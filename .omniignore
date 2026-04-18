@@ -1,0 +1,9 @@
+.git/
+node_modules/
+vendor/
+*.exe
+*.bin
+*.o
+*.so
+*.dylib
+.omni/
