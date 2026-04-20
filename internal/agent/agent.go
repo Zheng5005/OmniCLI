@@ -79,7 +79,18 @@ func New(client LLMClient, registry *tools.Registry, session *history.Session, s
 	}
 }
 
+// SetSend sets the callback function for sending messages to the TUI.
+// This is called after the tea.Program is created to wire p.Send.
+func (a *Agent) SetSend(fn SendFunc) {
+	a.send = fn
+}
+
 // ModelName returns the active model name from the LLM client.
 func (a *Agent) ModelName() string {
 	return a.client.ModelName()
+}
+
+// Session returns the agent's history session.
+func (a *Agent) Session() *history.Session {
+	return a.session
 }

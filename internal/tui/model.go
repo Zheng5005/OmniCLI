@@ -64,6 +64,26 @@ func NewModel(agentInstance *agent.Agent) Model {
 	}
 }
 
+// HistoryEntry represents a message from a previous session for --resume.
+type HistoryEntry struct {
+	Role    string
+	Content string
+}
+
+// LoadHistory renders previous session messages into the viewport.
+func (m *Model) LoadHistory(entries []HistoryEntry) {
+	m.viewport.AppendSystem("📂 Resumed session")
+	for _, e := range entries {
+		switch e.Role {
+		case "user":
+			m.viewport.AppendSystem("> " + e.Content)
+		case "assistant":
+			m.viewport.AppendChunk(e.Content)
+			m.viewport.FinalizeResponse()
+		}
+	}
+}
+
 // Init returns the initial command to query terminal dimensions.
 func (m Model) Init() tea.Cmd {
 	return tea.WindowSize()
@@ -156,9 +176,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ApprovalRequestMsg:
 		m.state = StateAwaitingApproval
 		m.pendingApproval = &msg
+		hint := "[y] to run, [n] to deny"
+		if msg.Classification == "safe" {
+			hint = "[Enter/y] to run, [n] to deny"
+		}
 		m.viewport.AppendSystem(
-			fmt.Sprintf("⚡ Command: %s [%s] — Press [Enter/y] to run, [n] to deny",
-				msg.Command, msg.Classification),
+			fmt.Sprintf("⚡ Command: %s [%s] — %s",
+				msg.Command, msg.Classification, hint),
 		)
 		m.statusBar.SetActivity(ActivityExecuting)
 		return m, nil

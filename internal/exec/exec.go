@@ -3,6 +3,7 @@ package exec
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os/exec"
 	"regexp"
 	"time"
@@ -69,7 +70,10 @@ func Run(ctx context.Context, cmd string, timeout time.Duration) (Result, error)
 			result.ExitCode = exitErr.ExitCode()
 			return result, nil
 		}
-		return result, err
+		if ctx.Err() == context.DeadlineExceeded {
+			return result, fmt.Errorf("command timed out after %v", timeout)
+		}
+		return result, fmt.Errorf("command failed to start: %w", err)
 	}
 
 	return result, nil
