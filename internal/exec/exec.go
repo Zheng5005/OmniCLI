@@ -66,12 +66,12 @@ func Run(ctx context.Context, cmd string, timeout time.Duration) (Result, error)
 	}
 
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return result, fmt.Errorf("command timed out after %v", timeout)
+		}
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			result.ExitCode = exitErr.ExitCode()
 			return result, nil
-		}
-		if ctx.Err() == context.DeadlineExceeded {
-			return result, fmt.Errorf("command timed out after %v", timeout)
 		}
 		return result, fmt.Errorf("command failed to start: %w", err)
 	}
