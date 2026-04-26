@@ -87,6 +87,9 @@ func (a *Agent) SetSend(fn SendFunc) {
 
 // ModelName returns the active model name from the LLM client.
 func (a *Agent) ModelName() string {
+	if a.client == nil {
+		return "no-api-key"
+	}
 	return a.client.ModelName()
 }
 

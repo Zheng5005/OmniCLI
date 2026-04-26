@@ -3,6 +3,7 @@ module github.com/omnicli/omnicli
 go 1.24.2
 
 require (
+	github.com/Zheng5005/omnigo v0.0.0-20260426064950-44db7f970aa8
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/glamour v1.0.0
@@ -13,7 +14,6 @@ require (
 	cloud.google.com/go v0.116.0 // indirect
 	cloud.google.com/go/auth v0.9.3 // indirect
 	cloud.google.com/go/compute/metadata v0.5.0 // indirect
-	github.com/Zheng5005/omnigo v0.0.0-20260419163419-ac4b5ecdcb26 // indirect
 	github.com/alecthomas/chroma/v2 v2.20.0 // indirect
 	github.com/anthropics/anthropic-sdk-go v1.30.0 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect

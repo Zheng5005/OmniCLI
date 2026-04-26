@@ -61,11 +61,20 @@ func main() {
 		log.Printf("Warning: %v", cerr)
 	}
 
-	// Create LLM client.
-	llmClient, err := agent.NewOmniGoClient(cfg.ModelPriority, true, agent.DefaultSystemPrompt)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to initialize LLM client: %v\n", err)
-		os.Exit(1)
+	// Create LLM client. If the configured models have no API key, try to
+	// auto-detect from available env vars (GOOGLE_API_KEY, ANTHROPIC_API_KEY,
+	// OPENAI_API_KEY). If none are set, continue without an LLM client — the
+	// TUI still launches and the user is prompted only when they try to chat.
+	models := agent.ResolveModels(cfg.ModelPriority)
+	var llmClient agent.LLMClient
+	if len(models) == 0 {
+		fmt.Fprintln(os.Stderr, "Warning: no API key detected (set GOOGLE_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY to enable the agent).")
+	} else {
+		llmClient, err = agent.NewOmniGoClient(models, true, agent.DefaultSystemPrompt)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to initialize LLM client: %v\n", err)
+			llmClient = nil
+		}
 	}
 
 	// Build tool registry.

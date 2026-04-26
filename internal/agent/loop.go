@@ -41,6 +41,11 @@ type ErrorMsg struct {
 // responses, executes any requested tool calls, and re-invokes the LLM
 // until no more tool calls remain or the iteration limit is reached.
 func (a *Agent) Run(ctx context.Context, prompt string) {
+	if a.client == nil {
+		a.send(ErrorMsg{Err: fmt.Errorf("no LLM client configured: set GOOGLE_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY and restart")})
+		return
+	}
+
 	a.session.AddMessage("user", prompt)
 
 	messages := a.buildMessages()
