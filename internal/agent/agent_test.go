@@ -192,3 +192,91 @@ func TestAgentRun(t *testing.T) {
 		})
 	}
 }
+
+func TestSetRegistry(t *testing.T) {
+	oldRegistry := tools.NewRegistry()
+	oldRegistry.Register(&mockTool{name: "old_tool", result: "old"})
+
+	newRegistry := tools.NewRegistry()
+	newRegistry.Register(&mockTool{name: "new_tool", result: "new"})
+
+	session := history.NewSession(t.TempDir())
+	ag := New(&mockLLMClient{}, oldRegistry, session, nil)
+
+	if ag.registry != oldRegistry {
+		t.Error("expected old registry to be set")
+	}
+
+	ag.SetRegistry(newRegistry)
+
+	if ag.registry != newRegistry {
+		t.Error("expected registry to be replaced")
+	}
+
+	// Verify the new registry is used.
+	tool, ok := ag.registry.Get("new_tool")
+	if !ok {
+		t.Fatal("expected new_tool to be found in new registry")
+	}
+	if tool.Name() != "new_tool" {
+		t.Errorf("tool name = %s, want new_tool", tool.Name())
+	}
+}
+
+func TestRecreateSession(t *testing.T) {
+	t.Run("empty models without stored config returns error", func(t *testing.T) {
+		session := history.NewSession(t.TempDir())
+		ag := New(&mockLLMClient{}, tools.NewRegistry(), session, nil)
+
+		err := ag.RecreateSession("test prompt", nil, nil)
+		if err == nil {
+			t.Fatal("expected error when no models are provided or stored")
+		}
+	})
+
+	t.Run("stored models used when models param is empty", func(t *testing.T) {
+		session := history.NewSession(t.TempDir())
+		ag := New(&mockLLMClient{}, tools.NewRegistry(), session, nil)
+		ag.SetClientConfig([]string{"gemini-1.5-flash"}, true)
+
+		// RecreateSession may fail if no API keys are available.
+		// If it succeeds, verify the client was replaced.
+		err := ag.RecreateSession("test prompt", []string{"list_files"}, nil)
+		if err != nil {
+			// Expected when API keys are missing; verify it's a creation error.
+			if ag.client == nil {
+				t.Skipf("skipping: no API key available (%v)", err)
+			}
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if ag.client == nil {
+			t.Fatal("expected client to be set after RecreateSession")
+		}
+		if ag.ModelName() != "gemini-1.5-flash" {
+			t.Errorf("model name = %s, want gemini-1.5-flash", ag.ModelName())
+		}
+	})
+
+	t.Run("explicit models override stored config", func(t *testing.T) {
+		session := history.NewSession(t.TempDir())
+		ag := New(&mockLLMClient{}, tools.NewRegistry(), session, nil)
+		ag.SetClientConfig([]string{"old-model"}, true)
+
+		// Use a valid model name that OmniGo can resolve with available API keys.
+		err := ag.RecreateSession("test prompt", nil, []string{"gemini-1.5-flash"})
+		if err != nil {
+			if ag.client == nil {
+				t.Skipf("skipping: no API key available (%v)", err)
+			}
+			t.Fatalf("unexpected error: %v", err)
+		}
+
+		if ag.client == nil {
+			t.Fatal("expected client to be set after RecreateSession")
+		}
+		if ag.ModelName() != "gemini-1.5-flash" {
+			t.Errorf("model name = %s, want gemini-1.5-flash", ag.ModelName())
+		}
+	})
+}

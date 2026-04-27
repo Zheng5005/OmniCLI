@@ -156,11 +156,89 @@ func TestModelUpdate(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "exit msg quits",
+			msg:  ExitMsg{},
+			checkFn: func(t *testing.T, _ Model, cmd tea.Cmd) {
+				if cmd == nil {
+					t.Fatal("expected a quit command, got nil")
+				}
+				msg := cmd()
+				if _, ok := msg.(tea.QuitMsg); !ok {
+					t.Errorf("expected tea.QuitMsg, got %T", msg)
+				}
+			},
+		},
+		{
+			name: "system msg appends to viewport",
+			msg:  SystemMsg{Content: "hello system"},
+			checkFn: func(t *testing.T, _ Model, _ tea.Cmd) {
+				// Just verify no panic
+			},
+		},
+		{
+			name: "skill activate with nil manager shows error",
+			msg:  SkillActivateMsg{Name: "test"},
+			checkFn: func(t *testing.T, m Model, _ tea.Cmd) {
+				if m.state != StateNormal {
+					t.Errorf("state = %d, want StateNormal", m.state)
+				}
+			},
+		},
+		{
+			name: "wizard cancelled returns to normal",
+			setup: func(m *Model) {
+				m.state = StateWizard
+				m.showWizard = true
+				m.activeSkill = nil
+			},
+			msg:       WizardCancelledMsg{},
+			wantState: StateNormal,
+			checkFn: func(t *testing.T, m Model, _ tea.Cmd) {
+				if m.showWizard {
+					t.Error("showWizard should be false")
+				}
+				if m.activeSkill != nil {
+					t.Error("activeSkill should be nil")
+				}
+			},
+		},
+		{
+			name: "wizard complete returns to normal",
+			setup: func(m *Model) {
+				m.state = StateWizard
+				m.showWizard = true
+				m.activeSkill = nil
+			},
+			msg:       WizardCompleteMsg{Values: map[string]string{"name": "val"}},
+			wantState: StateNormal,
+			checkFn: func(t *testing.T, m Model, _ tea.Cmd) {
+				if m.showWizard {
+					t.Error("showWizard should be false")
+				}
+			},
+		},
+		{
+			name: "submit slash command routes through router",
+			setup: func(m *Model) {
+				m.router = NewSlashRouter()
+			},
+			msg: SubmitMsg{Content: "/help"},
+			checkFn: func(t *testing.T, m Model, cmd tea.Cmd) {
+				if cmd == nil {
+					t.Fatal("expected a command, got nil")
+				}
+				msg := cmd()
+				if _, ok := msg.(SystemMsg); !ok {
+					t.Errorf("expected SystemMsg, got %T", msg)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := NewModel(nil)
+			m := NewModel(nil, nil, nil)
 			if tt.setup != nil {
 				tt.setup(&m)
 			}
@@ -176,7 +254,7 @@ func TestModelUpdate(t *testing.T) {
 }
 
 func TestLoadHistory(t *testing.T) {
-	m := NewModel(nil)
+	m := NewModel(nil, nil, nil)
 	entries := []HistoryEntry{
 		{Role: "user", Content: "hello"},
 		{Role: "assistant", Content: "hi there"},

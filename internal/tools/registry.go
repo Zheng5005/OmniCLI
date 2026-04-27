@@ -54,3 +54,24 @@ func (r *Registry) List() []Tool {
 	})
 	return result
 }
+
+// Filter returns a new Registry containing only tools whose names
+// appear in allowedTools. If allowedTools is nil or empty, returns
+// a copy of the full registry.
+func (r *Registry) Filter(allowedTools []string) *Registry {
+	filtered := NewRegistry()
+
+	if len(allowedTools) == 0 {
+		for name, t := range r.tools {
+			filtered.tools[name] = t
+		}
+		return filtered
+	}
+
+	for _, name := range allowedTools {
+		if t, ok := r.tools[name]; ok {
+			filtered.tools[name] = t
+		}
+	}
+	return filtered
+}

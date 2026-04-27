@@ -4,6 +4,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/omnicli/omnicli/internal/history"
 	"github.com/omnicli/omnicli/internal/tools"
@@ -63,10 +64,12 @@ type SendFunc func(msg interface{})
 
 // Agent orchestrates the LLM ↔ tool interaction loop.
 type Agent struct {
-	client   LLMClient
-	registry *tools.Registry
-	session  *history.Session
-	send     SendFunc
+	client        LLMClient
+	registry      *tools.Registry
+	session       *history.Session
+	send          SendFunc
+	models        []string
+	enablePricing bool
 }
 
 // New creates a new Agent with the given dependencies.
@@ -77,6 +80,37 @@ func New(client LLMClient, registry *tools.Registry, session *history.Session, s
 		session:  session,
 		send:     send,
 	}
+}
+
+// SetRegistry replaces the tool registry at runtime.
+func (a *Agent) SetRegistry(registry *tools.Registry) {
+	a.registry = registry
+}
+
+// SetClientConfig stores model and pricing configuration for session recreation.
+func (a *Agent) SetClientConfig(models []string, enablePricing bool) {
+	a.models = models
+	a.enablePricing = enablePricing
+}
+
+// RecreateSession creates a new OmniGo session with the given system prompt
+// and tool list, preserving existing conversation history.
+// This is used when activating a skill to swap the LLM configuration.
+func (a *Agent) RecreateSession(systemPrompt string, toolNames []string, models []string) error {
+	if len(models) == 0 {
+		models = a.models
+	}
+	if len(models) == 0 {
+		return fmt.Errorf("at least one model is required")
+	}
+
+	client, err := NewOmniGoClientWithTools(models, a.enablePricing, systemPrompt, toolNames)
+	if err != nil {
+		return fmt.Errorf("recreating session: %w", err)
+	}
+
+	a.client = client
+	return nil
 }
 
 // SetSend sets the callback function for sending messages to the TUI.

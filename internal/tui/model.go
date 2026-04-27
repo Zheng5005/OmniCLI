@@ -3,10 +3,12 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/omnicli/omnicli/internal/agent"
+	"github.com/omnicli/omnicli/internal/skills"
 )
 
 const (
@@ -25,6 +27,8 @@ const (
 	StateStreaming
 	// StateAwaitingApproval waits for user confirmation of a command.
 	StateAwaitingApproval
+	// StateWizard is active while the variable input wizard is displayed.
+	StateWizard
 )
 
 // Model is the root Bubble Tea model composing input, viewport, and status bar.
@@ -39,10 +43,15 @@ type Model struct {
 	pendingApproval *ApprovalRequestMsg
 	ctx             context.Context
 	cancel          context.CancelFunc
+	router          *SlashRouter
+	wizard          VariableWizard
+	showWizard      bool
+	activeSkill     *skills.Skill
+	skillManager    *skills.Manager
 }
 
-// NewModel creates a new root Model with the given agent.
-func NewModel(agentInstance *agent.Agent) Model {
+// NewModel creates a new root Model with the given agent, router, and skill manager.
+func NewModel(agentInstance *agent.Agent, router *SlashRouter, skillManager *skills.Manager) Model {
 	w, h := 80, 24
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -52,15 +61,17 @@ func NewModel(agentInstance *agent.Agent) Model {
 	}
 
 	return Model{
-		input:     NewInputModel(),
-		viewport:  NewViewportModel(w, h-inputHeight-statusBarHeight-padding),
-		statusBar: NewStatusBarModel(modelName, w),
-		agent:     agentInstance,
-		state:     StateNormal,
-		width:     w,
-		height:    h,
-		ctx:       ctx,
-		cancel:    cancel,
+		input:        NewInputModel(),
+		viewport:     NewViewportModel(w, h-inputHeight-statusBarHeight-padding),
+		statusBar:    NewStatusBarModel(modelName, w),
+		agent:        agentInstance,
+		state:        StateNormal,
+		width:        w,
+		height:       h,
+		ctx:          ctx,
+		cancel:       cancel,
+		router:       router,
+		skillManager: skillManager,
 	}
 }
 
@@ -100,13 +111,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
-		if msg.Type == tea.KeyRunes && string(msg.Runes) == "/exit" {
-			m.cancel()
-			return m, tea.Quit
-		}
-
 		if m.state == StateAwaitingApproval {
 			return m.handleApprovalKey(msg)
+		}
+
+		if m.state == StateWizard {
+			var cmd tea.Cmd
+			var model tea.Model
+			model, cmd = m.wizard.Update(msg)
+			m.wizard = model.(VariableWizard)
+			return m, cmd
 		}
 
 		if m.state == StateNormal {
@@ -126,9 +140,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.viewport.SetSize(msg.Width, vpHeight)
 		m.statusBar.SetWidth(msg.Width)
+		if m.showWizard {
+			m.wizard.SetSize(msg.Width, msg.Height)
+		}
 		return m, nil
 
 	case SubmitMsg:
+		if strings.HasPrefix(msg.Content, "/") {
+			handled, routerMsg, cmd := m.router.Dispatch(msg.Content)
+			if handled {
+				if routerMsg != nil {
+					return m, func() tea.Msg {
+						return routerMsg
+					}
+				}
+				return m, cmd
+			}
+		}
+
 		m.viewport.AppendSystem("> " + msg.Content)
 		m.state = StateStreaming
 		m.input.SetEnabled(false)
@@ -141,6 +170,60 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			go agentRef.Run(ctx, prompt)
 			return nil
 		}
+
+	case ExitMsg:
+		m.cancel()
+		return m, tea.Quit
+
+	case SystemMsg:
+		m.viewport.AppendSystem(msg.Content)
+		return m, nil
+
+	case SkillActivateMsg:
+		if m.skillManager == nil {
+			m.viewport.AppendSystem("⚠️ Skill manager not available")
+			return m, nil
+		}
+		if msg.Name == "none" {
+			m.activateSkill(nil, nil)
+			m.viewport.AppendSystem("Skill deactivated")
+			return m, nil
+		}
+		skill, err := m.skillManager.Get(msg.Name)
+		if err != nil {
+			m.viewport.AppendSystem(fmt.Sprintf("⚠️ Skill not found: %s", msg.Name))
+			return m, nil
+		}
+		m.activeSkill = skill
+		vars := skill.ExtractVariables()
+		if len(vars) > 0 {
+			descs := skill.Variables
+			if descs == nil {
+				descs = make(map[string]string)
+			}
+			m.wizard = NewVariableWizard(skill.DisplayName, vars, descs)
+			m.wizard.SetSize(m.width, m.height)
+			m.showWizard = true
+			m.state = StateWizard
+			return m, m.wizard.Init()
+		}
+		m.activateSkill(skill, make(map[string]string))
+		return m, nil
+
+	case WizardCompleteMsg:
+		m.showWizard = false
+		m.state = StateNormal
+		if m.activeSkill != nil {
+			m.activateSkill(m.activeSkill, msg.Values)
+		}
+		return m, nil
+
+	case WizardCancelledMsg:
+		m.showWizard = false
+		m.state = StateNormal
+		m.activeSkill = nil
+		m.viewport.AppendSystem("Skill activation cancelled")
+		return m, nil
 
 	case agent.StreamChunkMsg:
 		m.viewport.AppendChunk(msg.Content)
@@ -220,11 +303,64 @@ func (m Model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// activateSkill injects variables into the skill's system prompt, recreates
+// the agent session with the skill's tools, and updates the UI.
+func (m *Model) activateSkill(skill *skills.Skill, values map[string]string) {
+	if skill == nil {
+		m.activeSkill = nil
+		m.statusBar.SetSkill("")
+		m.input.SetSkillPrefix("")
+		return
+	}
+
+	prompt, err := skill.InjectVariables(values)
+	if err != nil {
+		m.viewport.AppendSystem(fmt.Sprintf("⚠️ Skill activation failed: %v", err))
+		m.activeSkill = nil
+		m.statusBar.SetSkill("")
+		m.input.SetSkillPrefix("")
+		return
+	}
+
+	if m.agent == nil {
+		m.viewport.AppendSystem("⚠️ Agent not available")
+		m.activeSkill = nil
+		m.statusBar.SetSkill("")
+		m.input.SetSkillPrefix("")
+		return
+	}
+
+	err = m.agent.RecreateSession(prompt, skill.Tools, nil)
+	if err != nil {
+		m.viewport.AppendSystem(fmt.Sprintf("⚠️ Failed to activate skill: %v", err))
+		m.activeSkill = nil
+		m.statusBar.SetSkill("")
+		m.input.SetSkillPrefix("")
+		return
+	}
+
+	m.activeSkill = skill
+	m.statusBar.SetModel(m.agent.ModelName())
+	m.statusBar.SetSkill(skill.DisplayName)
+	m.input.SetSkillPrefix(fmt.Sprintf("[%s] ", skill.DisplayName))
+	m.viewport.AppendSystem(fmt.Sprintf("✅ Skill activated: %s", skill.DisplayName))
+}
+
 // View renders the full TUI layout.
 func (m Model) View() string {
-	return lipgloss.JoinVertical(lipgloss.Left,
+	view := lipgloss.JoinVertical(lipgloss.Left,
 		m.viewport.View(),
 		m.statusBar.View(),
 		m.input.View(),
 	)
+
+	if m.showWizard {
+		wizardOverlay := lipgloss.Place(m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			m.wizard.View(),
+		)
+		return wizardOverlay
+	}
+
+	return view
 }

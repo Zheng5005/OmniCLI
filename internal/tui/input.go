@@ -1,14 +1,18 @@
 package tui
 
 import (
+	"strings"
+
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // InputModel wraps a Bubble Tea textarea for user prompt input.
 type InputModel struct {
-	textarea textarea.Model
-	enabled  bool
+	textarea    textarea.Model
+	enabled     bool
+	skillPrefix string // e.g., "[Docs Expert] " — empty when no skill
 }
 
 // NewInputModel creates a new InputModel with sensible defaults.
@@ -35,7 +39,7 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		if keyMsg.Type == tea.KeyEnter && !keyMsg.Alt {
-			value := m.textarea.Value()
+			value := strings.TrimSpace(m.textarea.Value())
 			if value != "" {
 				m.textarea.Reset()
 				return m, func() tea.Msg {
@@ -51,9 +55,19 @@ func (m InputModel) Update(msg tea.Msg) (InputModel, tea.Cmd) {
 	return m, cmd
 }
 
-// View renders the textarea.
+// View renders the textarea, prepending the skill prefix when active.
 func (m InputModel) View() string {
-	return m.textarea.View()
+	if m.skillPrefix == "" {
+		return m.textarea.View()
+	}
+	prefixStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6"))
+	prefix := prefixStyle.Render(m.skillPrefix)
+	return prefix + m.textarea.View()
+}
+
+// SetSkillPrefix updates the displayed skill prefix.
+func (m *InputModel) SetSkillPrefix(prefix string) {
+	m.skillPrefix = prefix
 }
 
 // SetEnabled toggles input acceptance, focusing or blurring accordingly.

@@ -35,7 +35,6 @@ type Read_file struct {
 // Run_command is the OmniGo tool schema for the run_command tool.
 type Run_command struct {
 	Command string `json:"command" desc:"Shell command to execute."`
-	Timeout int    `json:"timeout" desc:"Timeout in seconds (default 30)."`
 }
 
 // OmniGoClient adapts the OmniGo library to the LLMClient interface.
@@ -43,7 +42,12 @@ type Run_command struct {
 // support tool calls. Text responses are delivered via onChunk as simulated
 // streaming.
 type OmniGoClient struct {
+	client    *omnigo.Client
 	session   *omnigo.Session
+	models    []string
+	enablePricing bool
+	systemPrompt string
+	tools     []interface{}
 	modelName string
 }
 
@@ -51,6 +55,13 @@ type OmniGoClient struct {
 // The first model in the list is used as the primary; the rest are fallbacks.
 // API keys are resolved from environment variables by OmniGo.
 func NewOmniGoClient(models []string, enablePricing bool, systemPrompt string) (*OmniGoClient, error) {
+	return NewOmniGoClientWithTools(models, enablePricing, systemPrompt, nil)
+}
+
+// NewOmniGoClientWithTools creates a client with only the specified tools.
+// toolNames is a list of tool names to register (e.g., ["list_files", "read_file"]).
+// If toolNames is nil or empty, registers all default tools.
+func NewOmniGoClientWithTools(models []string, enablePricing bool, systemPrompt string, toolNames []string) (*OmniGoClient, error) {
 	if len(models) == 0 {
 		return nil, fmt.Errorf("at least one model is required")
 	}
@@ -70,18 +81,38 @@ func NewOmniGoClient(models []string, enablePricing bool, systemPrompt string) (
 
 	session := client.NewSession(omnigo.WithSystemPrompt(systemPrompt))
 
-	if err := session.RegisterTools(
-		List_files{},
-		Grep_search{},
-		Read_file{},
-		Run_command{},
-	); err != nil {
-		return nil, fmt.Errorf("registering tools: %w", err)
+	if len(toolNames) == 0 {
+		toolNames = []string{"list_files", "grep_search", "read_file", "run_command"}
+	}
+
+	toolMap := map[string]interface{}{
+		"list_files":  List_files{},
+		"grep_search": Grep_search{},
+		"read_file":   Read_file{},
+		"run_command": Run_command{},
+	}
+
+	toolsToRegister := make([]interface{}, 0, len(toolNames))
+	for _, name := range toolNames {
+		if tool, ok := toolMap[name]; ok {
+			toolsToRegister = append(toolsToRegister, tool)
+		}
+	}
+
+	if len(toolsToRegister) > 0 {
+		if err := session.RegisterTools(toolsToRegister...); err != nil {
+			return nil, fmt.Errorf("registering tools: %w", err)
+		}
 	}
 
 	return &OmniGoClient{
-		session:   session,
-		modelName: models[0],
+		client:       client,
+		session:      session,
+		models:       models,
+		enablePricing: enablePricing,
+		systemPrompt: systemPrompt,
+		tools:        toolsToRegister,
+		modelName:    models[0],
 	}, nil
 }
 
@@ -94,20 +125,46 @@ func (o *OmniGoClient) ModelName() string {
 // support tool calls (OmniGo's streaming API does not return tool calls).
 // Text is delivered through onChunk to simulate streaming for the TUI.
 //
-// The adapter lets OmniGo manage its own conversation history. For user
-// messages it passes the content directly. For tool results it injects them
-// as formatted text since OmniGo's Session.Chat only accepts string input.
+// For tool results, a fresh session is created to avoid accumulated history
+// issues with strict providers like Gemini. The full conversation context
+// is passed as a single formatted message.
 func (o *OmniGoClient) ChatStream(ctx context.Context, messages []ChatMessage, toolDefs []ToolDefinition, onChunk func(StreamChunk)) (*ChatMessage, *Usage, error) {
 	lastMsg := messages[len(messages)-1]
 	var input string
+	useFreshSession := false
 
 	if lastMsg.Role == "tool" {
-		input = formatToolResults(messages)
+		// For tool results, use a fresh session to avoid Gemini format errors.
+		// Include the original user prompt as context in a single message.
+		originalPrompt := findLastUserMessage(messages)
+		toolResults := formatToolResults(messages)
+		if originalPrompt != "" {
+			input = fmt.Sprintf("Original request: %s\n\n%s", originalPrompt, toolResults)
+		} else {
+			input = toolResults
+		}
+		useFreshSession = true
 	} else {
 		input = lastMsg.Content
 	}
 
-	resp, err := o.session.Chat(ctx, input)
+	// Ensure input is never empty — Gemini rejects empty messages
+	if strings.TrimSpace(input) == "" {
+		input = "(no input provided)"
+	}
+
+	// Use a fresh session for tool results to avoid accumulated history issues
+	var sess *omnigo.Session
+	if useFreshSession && o.client != nil {
+		sess = o.client.NewSession(omnigo.WithSystemPrompt(o.systemPrompt))
+		if len(o.tools) > 0 {
+			_ = sess.RegisterTools(o.tools...)
+		}
+	} else {
+		sess = o.session
+	}
+
+	resp, err := sess.Chat(ctx, input)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -140,17 +197,42 @@ func (o *OmniGoClient) ChatStream(ctx context.Context, messages []ChatMessage, t
 	return result, usage, nil
 }
 
+// findLastUserMessage returns the content of the most recent user-role message.
+func findLastUserMessage(messages []ChatMessage) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "user" {
+			return messages[i].Content
+		}
+	}
+	return ""
+}
+
 // formatToolResults builds a user message containing tool execution results
 // from the trailing tool-role messages in the conversation.
+// Format is structured text that all providers (including Gemini) can parse.
 func formatToolResults(messages []ChatMessage) string {
 	var b strings.Builder
-	b.WriteString("Tool execution results:\n\n")
+	b.WriteString("The following tool calls were executed. Use these results to continue:\n\n")
 
+	count := 0
 	for _, m := range messages {
 		if m.Role != "tool" {
 			continue
 		}
-		b.WriteString(fmt.Sprintf("[%s]\n%s\n\n", m.ToolCallID, m.Content))
+		count++
+		content := m.Content
+		if content == "" {
+			content = "(empty result)"
+		}
+		// Sanitize: truncate very long results to avoid token limits
+		if len(content) > 8000 {
+			content = content[:8000] + "\n... (truncated)"
+		}
+		b.WriteString(fmt.Sprintf("## Tool Result %d\n%s\n\n", count, content))
+	}
+
+	if count == 0 {
+		b.WriteString("(no tool results available)\n")
 	}
 
 	return b.String()

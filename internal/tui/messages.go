@@ -18,3 +18,21 @@ type ApprovalRequestMsg struct {
 
 // WindowSizeMsg wraps tea.WindowSizeMsg for internal routing.
 type WindowSizeMsg = tea.WindowSizeMsg
+
+// ExitMsg signals the user wants to exit.
+type ExitMsg struct{}
+
+// SystemMsg displays a system message in the viewport.
+type SystemMsg struct{ Content string }
+
+// SkillActivateMsg requests activation of a skill by name.
+type SkillActivateMsg struct{ Name string }
+
+// SkillActivatedMsg confirms a skill was activated with resolved variables.
+type SkillActivatedMsg struct{ Name, DisplayName, Prompt string }
+
+// WizardCompleteMsg is sent when the variable wizard finishes.
+type WizardCompleteMsg struct{ Values map[string]string }
+
+// WizardCancelledMsg is sent when the user cancels the wizard.
+type WizardCancelledMsg struct{}

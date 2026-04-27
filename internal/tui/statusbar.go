@@ -53,6 +53,7 @@ type StatusBarModel struct {
 	cost     float64
 	activity Activity
 	width    int
+	skill    string
 }
 
 // NewStatusBarModel creates a new status bar for the given model name and width.
@@ -74,6 +75,9 @@ func (m *StatusBarModel) SetWidth(width int) { m.width = width }
 
 // SetModel updates the displayed model name.
 func (m *StatusBarModel) SetModel(name string) { m.model = name }
+
+// SetSkill updates the displayed skill name.
+func (m *StatusBarModel) SetSkill(name string) { m.skill = name }
 
 // View renders the status bar spanning the full terminal width.
 func (m StatusBarModel) View() string {
@@ -97,7 +101,12 @@ func (m StatusBarModel) View() string {
 
 	left := leftStyle.Render(m.model)
 	center := centerStyle.Render(m.activity.String())
-	right := rightStyle.Render(fmt.Sprintf("$%.4f", m.cost))
+
+	rightContent := fmt.Sprintf("$%.4f", m.cost)
+	if m.skill != "" {
+		rightContent = fmt.Sprintf("SKILL: %s $%.4f", m.skill, m.cost)
+	}
+	right := rightStyle.Render(rightContent)
 
 	leftW := lipgloss.Width(left)
 	rightW := lipgloss.Width(right)

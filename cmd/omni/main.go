@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/omnicli/omnicli/internal/agent"
@@ -12,12 +13,20 @@ import (
 	"github.com/omnicli/omnicli/internal/exec"
 	"github.com/omnicli/omnicli/internal/history"
 	"github.com/omnicli/omnicli/internal/security"
+	"github.com/omnicli/omnicli/internal/skills"
 	"github.com/omnicli/omnicli/internal/tools"
 	"github.com/omnicli/omnicli/internal/tui"
 )
 
 func main() {
+	// Check for skill subcommand
+	if len(os.Args) > 1 && os.Args[1] == "skill" {
+		runSkillInit(os.Args[2:])
+		return
+	}
+
 	resume := flag.Bool("resume", false, "Resume the last active session")
+	skillName := flag.String("skill", "", "Activate a skill on startup")
 	flag.Parse()
 
 	// Redirect log output through the redacting writer.
@@ -100,9 +109,37 @@ func main() {
 
 	// Create agent with nil send — wired after program creation.
 	agentInstance := agent.New(llmClient, registry, session, nil)
+	agentInstance.SetClientConfig(models, true)
+
+	// Build slash router and skill manager.
+	router := tui.NewSlashRouter()
+	projectDir, globalDir := skills.DefaultDirs()
+	skillManager := skills.NewManager(projectDir)
+	skillManager.SetGlobalDir(globalDir)
+
+	// Override the default /skill handler to use the real skill manager.
+	router.Register("skill", func(args string) (tea.Msg, tea.Cmd) {
+		name := strings.TrimSpace(args)
+		if name == "" {
+			return tui.SystemMsg{Content: "Usage: /skill <name>. Use /skills to list available skills."}, nil
+		}
+		return tui.SkillActivateMsg{Name: name}, nil
+	})
+
+	// Override /skills to list real skills.
+	router.Register("skills", func(args string) (tea.Msg, tea.Cmd) {
+		names, err := skillManager.List()
+		if err != nil {
+			return tui.SystemMsg{Content: fmt.Sprintf("Error listing skills: %v", err)}, nil
+		}
+		if len(names) == 0 {
+			return tui.SystemMsg{Content: "No skills found. Create one with: omni skill init\n  Project skills: .omnicli/skills/*.json\n  Global skills:  ~/.config/omnicli/skills/*.json"}, nil
+		}
+		return tui.SystemMsg{Content: "Available skills: " + strings.Join(names, ", ")}, nil
+	})
 
 	// Build TUI model and optionally load resumed history.
-	model := tui.NewModel(agentInstance)
+	model := tui.NewModel(agentInstance, router, skillManager)
 	if *resume && len(session.Messages) > 0 {
 		entries := make([]tui.HistoryEntry, len(session.Messages))
 		for i, m := range session.Messages {
@@ -116,6 +153,16 @@ func main() {
 	agentInstance.SetSend(func(msg interface{}) {
 		program.Send(msg)
 	})
+
+	// Activate skill on startup if --skill flag is provided.
+	if *skillName != "" {
+		_, err := skillManager.Get(*skillName)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: skill %q not found\n", *skillName)
+		} else {
+			program.Send(tui.SkillActivateMsg{Name: *skillName})
+		}
+	}
 
 	if _, err := program.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
