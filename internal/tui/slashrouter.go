@@ -28,7 +28,27 @@ func NewSlashRouter() *SlashRouter {
 	})
 
 	r.Register("help", func(args string) (tea.Msg, tea.Cmd) {
-		return SystemMsg{Content: "Available commands: /exit, /help, /skills, /skill <name>"}, nil
+		return SystemMsg{Content: "Available commands: /exit, /help, /mcp, /attach, /detach <uri>, /skills, /skill <name>"}, nil
+	})
+
+	r.Register("mcp", func(args string) (tea.Msg, tea.Cmd) {
+		return McpServerListMsg{}, nil
+	})
+
+	r.Register("attach", func(args string) (tea.Msg, tea.Cmd) {
+		return ResourceBrowserOpenMsg{}, nil
+	})
+
+	r.Register("detach", func(args string) (tea.Msg, tea.Cmd) {
+		arg := strings.TrimSpace(args)
+		if arg == "" {
+			return SystemMsg{Content: "Usage: /detach <server> <uri> or /detach <uri>"}, nil
+		}
+		parts := strings.Fields(arg)
+		if len(parts) >= 2 {
+			return ResourceDetachMsg{ServerName: parts[0], URI: parts[1]}, nil
+		}
+		return ResourceDetachMsg{URI: parts[0]}, nil
 	})
 
 	r.Register("skills", func(args string) (tea.Msg, tea.Cmd) {

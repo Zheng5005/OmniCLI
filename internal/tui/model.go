@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/omnicli/omnicli/internal/agent"
+	"github.com/omnicli/omnicli/internal/mcp"
 	"github.com/omnicli/omnicli/internal/skills"
 )
 
@@ -29,25 +31,35 @@ const (
 	StateAwaitingApproval
 	// StateWizard is active while the variable input wizard is displayed.
 	StateWizard
+	// StateMcpApproval waits for user confirmation of an MCP tool call.
+	StateMcpApproval
+	// StateResourceBrowser is active while the resource picker is displayed.
+	StateResourceBrowser
 )
 
 // Model is the root Bubble Tea model composing input, viewport, and status bar.
 type Model struct {
-	input           InputModel
-	viewport        ViewportModel
-	statusBar       StatusBarModel
-	agent           *agent.Agent
-	state           State
-	width           int
-	height          int
-	pendingApproval *ApprovalRequestMsg
-	ctx             context.Context
-	cancel          context.CancelFunc
-	router          *SlashRouter
-	wizard          VariableWizard
-	showWizard      bool
-	activeSkill     *skills.Skill
-	skillManager    *skills.Manager
+	input              InputModel
+	viewport           ViewportModel
+	statusBar          StatusBarModel
+	agent              *agent.Agent
+	state              State
+	width              int
+	height             int
+	pendingApproval    *ApprovalRequestMsg
+	pendingMCPApproval *MCPApprovalRequestMsg
+	approvalDialog     ApprovalDialog
+	showApprovalDialog bool
+	resourcePanel      ResourcePanel
+	resourceBrowser    ResourceBrowser
+	showResourceBrowser bool
+	ctx                context.Context
+	cancel             context.CancelFunc
+	router             *SlashRouter
+	wizard             VariableWizard
+	showWizard         bool
+	activeSkill        *skills.Skill
+	skillManager       *skills.Manager
 }
 
 // NewModel creates a new root Model with the given agent, router, and skill manager.
@@ -61,17 +73,19 @@ func NewModel(agentInstance *agent.Agent, router *SlashRouter, skillManager *ski
 	}
 
 	return Model{
-		input:        NewInputModel(),
-		viewport:     NewViewportModel(w, h-inputHeight-statusBarHeight-padding),
-		statusBar:    NewStatusBarModel(modelName, w),
-		agent:        agentInstance,
-		state:        StateNormal,
-		width:        w,
-		height:       h,
-		ctx:          ctx,
-		cancel:       cancel,
-		router:       router,
-		skillManager: skillManager,
+		input:           NewInputModel(),
+		viewport:        NewViewportModel(w, h-inputHeight-statusBarHeight-padding),
+		statusBar:       NewStatusBarModel(modelName, w),
+		agent:           agentInstance,
+		state:           StateNormal,
+		width:           w,
+		height:          h,
+		resourcePanel:   NewResourcePanel(),
+		resourceBrowser: NewResourceBrowser(w, h),
+		ctx:             ctx,
+		cancel:          cancel,
+		router:          router,
+		skillManager:    skillManager,
 	}
 }
 
@@ -109,6 +123,50 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c":
 			m.cancel()
 			return m, tea.Quit
+		case "ctrl+r":
+			if m.state == StateNormal {
+				m.resourcePanel.Toggle()
+				m.recalcLayout()
+				return m, nil
+			}
+		}
+
+		if m.state == StateMcpApproval {
+			model, cmd := m.approvalDialog.Update(msg)
+			m.approvalDialog = model.(ApprovalDialog)
+			if m.approvalDialog.Approved() != nil {
+				m.state = StateStreaming
+				m.showApprovalDialog = false
+				m.pendingMCPApproval = nil
+			}
+			return m, cmd
+		}
+
+		if m.state == StateResourceBrowser {
+			switch msg.String() {
+			case "j", "down":
+				m.resourceBrowser.MoveDown()
+				return m, nil
+			case "k", "up":
+				m.resourceBrowser.MoveUp()
+				return m, nil
+			case "enter":
+				m.resourceBrowser.MarkSelected()
+				item := m.resourceBrowser.Selected()
+				if item != nil {
+					m.showResourceBrowser = false
+					m.state = StateNormal
+					return m, m.readResourceCmd(item.ServerName, item.URI, item.Name, item.Description)
+				}
+				m.showResourceBrowser = false
+				m.state = StateNormal
+				return m, nil
+			case "esc", "q":
+				m.showResourceBrowser = false
+				m.state = StateNormal
+				return m, nil
+			}
+			return m, nil
 		}
 
 		if m.state == StateAwaitingApproval {
@@ -134,14 +192,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		vpHeight := msg.Height - inputHeight - statusBarHeight - padding
-		if vpHeight < 1 {
-			vpHeight = 1
-		}
-		m.viewport.SetSize(msg.Width, vpHeight)
+		m.recalcLayout()
 		m.statusBar.SetWidth(msg.Width)
 		if m.showWizard {
 			m.wizard.SetSize(msg.Width, msg.Height)
+		}
+		if m.showResourceBrowser {
+			m.resourceBrowser.SetSize(msg.Width, msg.Height)
 		}
 		return m, nil
 
@@ -236,6 +293,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.statusBar.SetActivity(ActivitySearching)
 		}
 		m.viewport.AppendSystem(fmt.Sprintf("🔧 Using tool: %s", msg.Name))
+
+		// Detect MCP tool calls and show flash for trusted servers.
+		if strings.Contains(msg.Name, "__") {
+			parts := strings.SplitN(msg.Name, "__", 2)
+			if len(parts) == 2 && m.agent != nil && m.agent.MCPManager() != nil {
+				client := m.agent.MCPManager().Client(parts[0])
+				if client != nil && client.Config().Trusted {
+					m.statusBar.SetFlash(fmt.Sprintf("[✓] %s:%s", parts[0], parts[1]), 2*time.Second)
+				}
+			}
+		}
+		m.updateMCPStatus()
 		return m, nil
 
 	case agent.AgentDoneMsg:
@@ -243,6 +312,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = StateNormal
 		m.input.SetEnabled(true)
 		m.statusBar.SetActivity(ActivityReady)
+		m.updateMCPStatus()
 		return m, nil
 
 	case agent.CostUpdateMsg:
@@ -269,6 +339,59 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		)
 		m.statusBar.SetActivity(ActivityExecuting)
 		return m, nil
+
+	case MCPApprovalRequestMsg:
+		m.state = StateMcpApproval
+		m.pendingMCPApproval = &msg
+		m.approvalDialog = NewApprovalDialog(msg.ServerName, msg.ToolName, msg.Description, msg.Args, msg.ResponseCh)
+		m.approvalDialog.SetSize(m.width, m.height)
+		m.showApprovalDialog = true
+		m.statusBar.SetActivity(ActivityExecuting)
+		return m, nil
+
+	case McpServerListMsg:
+		return m.handleMcpServerList()
+
+	case McpErrorMsg:
+		m.viewport.AppendSystem(fmt.Sprintf("⚠️ MCP Server '%s' error: %s — check /mcp for details", msg.ServerName, msg.Error))
+		m.updateMCPStatus()
+		return m, nil
+
+	case McpTrustedToolFlashMsg:
+		m.statusBar.SetFlash(fmt.Sprintf("[✓] %s:%s", msg.ServerName, msg.ToolName), 2*time.Second)
+		return m, nil
+
+	case ResourceBrowserOpenMsg:
+		m.state = StateResourceBrowser
+		m.showResourceBrowser = true
+		m.resourceBrowser = NewResourceBrowser(m.width, m.height)
+		return m, m.fetchResourcesCmd()
+
+	case ResourceListLoadedMsg:
+		m.resourceBrowser.SetItems(msg.Items)
+		return m, nil
+
+	case ResourceSelectedMsg:
+		return m, m.readResourceCmd(msg.ServerName, msg.URI, msg.Name, msg.Description)
+
+	case ResourceAttachMsg:
+		if m.agent != nil {
+			_ = m.agent.AttachResource(msg.Resource)
+			if err := m.agent.RecreateSession("", m.agent.AllToolNames(), nil); err != nil {
+				m.viewport.AppendSystem(fmt.Sprintf("⚠️ Failed to update session: %v", err))
+			}
+		}
+		m.updateResourcePanel()
+		m.viewport.AppendSystem(fmt.Sprintf("📎 Attached resource: %s (%s)", msg.Resource.Name, msg.Resource.URI))
+		return m, nil
+
+	case ResourceDetachMsg:
+		m.detachResource(msg.ServerName, msg.URI)
+		return m, nil
+
+	case ResourceErrorMsg:
+		m.viewport.AppendSystem(fmt.Sprintf("⚠️ Resource error: %s", msg.Err))
+		return m, nil
 	}
 
 	// Delegate scroll events to viewport.
@@ -279,6 +402,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleApprovalKey processes key presses during the approval state.
 func (m Model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle MCP tool approval.
+	if m.pendingMCPApproval != nil {
+		switch {
+		case msg.String() == "y":
+			m.pendingMCPApproval.ResponseCh <- true
+		case msg.String() == "n":
+			m.pendingMCPApproval.ResponseCh <- false
+		default:
+			return m, nil
+		}
+		m.pendingMCPApproval = nil
+		m.state = StateStreaming
+		return m, nil
+	}
+
 	if m.pendingApproval == nil {
 		return m, nil
 	}
@@ -346,13 +484,237 @@ func (m *Model) activateSkill(skill *skills.Skill, values map[string]string) {
 	m.viewport.AppendSystem(fmt.Sprintf("✅ Skill activated: %s", skill.DisplayName))
 }
 
+// handleMcpServerList builds and displays the MCP server list in the viewport.
+func (m Model) handleMcpServerList() (tea.Model, tea.Cmd) {
+	if m.agent == nil || m.agent.MCPManager() == nil {
+		m.viewport.AppendSystem("No MCP manager configured.")
+		return m, nil
+	}
+
+	mgr := m.agent.MCPManager()
+	statuses := mgr.Status()
+	if len(statuses) == 0 {
+		m.viewport.AppendSystem("No MCP servers configured.")
+		return m, nil
+	}
+
+	var b strings.Builder
+	b.WriteString("## MCP Servers\n\n")
+	b.WriteString("| Server | Status | Tools | Health |\n")
+	b.WriteString("|--------|--------|-------|--------|\n")
+	for name, st := range statuses {
+		health := "✓"
+		if !st.Healthy {
+			health = "✗"
+		}
+		stateIcon := "🟢"
+		switch st.State {
+		case "error", "failed":
+			stateIcon = "🔴"
+		case "disconnected":
+			stateIcon = "⚪"
+		}
+		b.WriteString(fmt.Sprintf("| %s | %s %s | %d | %s |\n", name, stateIcon, st.State, st.Tools, health))
+		if st.Error != "" {
+			b.WriteString(fmt.Sprintf("| | *Error: %s* | | |\n", st.Error))
+		}
+	}
+	b.WriteString("\n")
+
+	for name, st := range statuses {
+		if st.State != "ready" {
+			continue
+		}
+		client := mgr.Client(name)
+		if client == nil {
+			continue
+		}
+		tools := client.Tools()
+		if len(tools) > 0 {
+			b.WriteString(fmt.Sprintf("### %s Tools\n\n", name))
+			for _, t := range tools {
+				b.WriteString(fmt.Sprintf("- **%s**: %s\n", t.Name, t.Description))
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	m.viewport.AppendMarkdown(b.String())
+	m.updateMCPStatus()
+	return m, nil
+}
+
+// recalcLayout adjusts viewport and panel sizes based on current dimensions.
+func (m *Model) recalcLayout() {
+	panelWidth := 0
+	if m.resourcePanel.Visible() {
+		panelWidth = m.width / 3
+		if panelWidth > 40 {
+			panelWidth = 40
+		}
+		if panelWidth < 20 {
+			panelWidth = 20
+		}
+	}
+	vpWidth := m.width - panelWidth
+	vpHeight := m.height - inputHeight - statusBarHeight - padding
+	if vpHeight < 1 {
+		vpHeight = 1
+	}
+	m.viewport.SetSize(vpWidth, vpHeight)
+	m.resourcePanel.SetSize(panelWidth, vpHeight)
+	m.input.SetWidth(vpWidth)
+}
+
+// fetchResourcesCmd returns a command that fetches available resources from all MCP servers.
+func (m Model) fetchResourcesCmd() tea.Cmd {
+	return func() tea.Msg {
+		if m.agent == nil || m.agent.MCPManager() == nil {
+			return ResourceListLoadedMsg{Items: nil}
+		}
+		mgr := m.agent.MCPManager()
+		var items []ResourceItem
+		for name, st := range mgr.Status() {
+			if st.State != "ready" {
+				continue
+			}
+			client := mgr.Client(name)
+			if client == nil {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			resources, err := client.ListResources(ctx)
+			cancel()
+			if err != nil {
+				continue
+			}
+			for _, r := range resources {
+				items = append(items, ResourceItem{
+					ServerName:  name,
+					URI:         r.URI,
+					Name:        r.Name,
+					Description: r.Description,
+				})
+			}
+		}
+		return ResourceListLoadedMsg{Items: items}
+	}
+}
+
+// readResourceCmd returns a command that reads an MCP resource and returns an attach message.
+func (m Model) readResourceCmd(serverName, uri, name, description string) tea.Cmd {
+	return func() tea.Msg {
+		if m.agent == nil || m.agent.MCPManager() == nil {
+			return ResourceErrorMsg{Err: "MCP manager not available"}
+		}
+		client := m.agent.MCPManager().Client(serverName)
+		if client == nil {
+			return ResourceErrorMsg{Err: fmt.Sprintf("server %s not connected", serverName)}
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		content, err := client.ReadResource(ctx, uri)
+		cancel()
+		if err != nil {
+			return ResourceErrorMsg{Err: fmt.Sprintf("failed to read %s: %v", uri, err)}
+		}
+		return ResourceAttachMsg{
+			Resource: mcp.PinnedResource{
+				ServerName:  serverName,
+				URI:         uri,
+				Name:        name,
+				Description: description,
+				Content:     content,
+			},
+		}
+	}
+}
+
+// detachResource removes a pinned resource and updates the session.
+func (m *Model) detachResource(serverName, uri string) {
+	if m.agent != nil {
+		// If serverName is empty, try to find by URI only.
+		if serverName == "" {
+			for _, r := range m.agent.PinnedResources() {
+				if r.URI == uri {
+					serverName = r.ServerName
+					break
+				}
+			}
+		}
+		m.agent.DetachResource(serverName, uri)
+		if err := m.agent.RecreateSession("", m.agent.AllToolNames(), nil); err != nil {
+			m.viewport.AppendSystem(fmt.Sprintf("⚠️ Failed to update session: %v", err))
+		}
+	}
+	m.updateResourcePanel()
+	m.viewport.AppendSystem(fmt.Sprintf("📎 Detached resource: %s", uri))
+}
+
+// updateResourcePanel syncs the panel with the agent's pinned resources.
+func (m *Model) updateResourcePanel() {
+	if m.agent != nil {
+		m.resourcePanel.SetResources(m.agent.PinnedResources())
+	}
+}
+
+// updateMCPStatus queries the MCP manager and updates the status bar.
+func (m *Model) updateMCPStatus() {
+	if m.agent == nil || m.agent.MCPManager() == nil {
+		m.statusBar.SetMCPStatus("")
+		return
+	}
+
+	statuses := m.agent.MCPManager().Status()
+	if len(statuses) == 0 {
+		m.statusBar.SetMCPStatus("")
+		return
+	}
+
+	active := 0
+	errors := 0
+	for _, st := range statuses {
+		if st.State == "ready" {
+			active++
+		} else if st.State == "error" || st.State == "failed" {
+			errors++
+		}
+	}
+
+	var parts []string
+	if active > 0 {
+		parts = append(parts, fmt.Sprintf("MCP:%d↑", active))
+	}
+	if errors > 0 {
+		parts = append(parts, fmt.Sprintf("%d⚠", errors))
+	}
+
+	if len(parts) > 0 {
+		m.statusBar.SetMCPStatus("[" + strings.Join(parts, " ") + "]")
+	} else {
+		m.statusBar.SetMCPStatus("")
+	}
+}
+
 // View renders the full TUI layout.
 func (m Model) View() string {
-	view := lipgloss.JoinVertical(lipgloss.Left,
-		m.viewport.View(),
-		m.statusBar.View(),
-		m.input.View(),
-	)
+	var view string
+	if m.resourcePanel.Visible() {
+		view = lipgloss.JoinHorizontal(lipgloss.Top,
+			m.viewport.View(),
+			m.resourcePanel.View(),
+		)
+		view = lipgloss.JoinVertical(lipgloss.Left,
+			view,
+			m.statusBar.View(),
+			m.input.View(),
+		)
+	} else {
+		view = lipgloss.JoinVertical(lipgloss.Left,
+			m.viewport.View(),
+			m.statusBar.View(),
+			m.input.View(),
+		)
+	}
 
 	if m.showWizard {
 		wizardOverlay := lipgloss.Place(m.width, m.height,
@@ -360,6 +722,22 @@ func (m Model) View() string {
 			m.wizard.View(),
 		)
 		return wizardOverlay
+	}
+
+	if m.showApprovalDialog {
+		approvalOverlay := lipgloss.Place(m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			m.approvalDialog.View(),
+		)
+		return approvalOverlay
+	}
+
+	if m.showResourceBrowser {
+		browserOverlay := lipgloss.Place(m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			m.resourceBrowser.View(),
+		)
+		return browserOverlay
 	}
 
 	return view

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+
+	"github.com/omnicli/omnicli/internal/mcp"
 )
 
 // maxIterations is the maximum number of LLM round-trips to prevent
@@ -29,7 +31,9 @@ type AgentDoneMsg struct {
 
 // CostUpdateMsg carries an updated cumulative cost to the TUI.
 type CostUpdateMsg struct {
-	Cost float64
+	Cost          float64
+	McpDataTokens int
+	McpDataCost   float64
 }
 
 // ErrorMsg carries an error from the agent loop to the TUI.
@@ -52,6 +56,9 @@ func (a *Agent) Run(ctx context.Context, prompt string) {
 	toolDefs := a.buildToolDefs()
 
 	var totalCost float64
+	var totalMcpDataTokens int
+	var totalMcpDataCost float64
+	var lastInputRate float64
 
 	for i := 0; i < maxIterations; i++ {
 		var accumulated string
@@ -69,6 +76,11 @@ func (a *Agent) Run(ctx context.Context, prompt string) {
 
 		if usage != nil {
 			totalCost += usage.Cost
+			if usage.PromptTokens > 0 {
+				lastInputRate = usage.InputCost / float64(usage.PromptTokens)
+			} else if usage.TotalTokens > 0 {
+				lastInputRate = usage.Cost / float64(usage.TotalTokens)
+			}
 		}
 
 		if len(finalMsg.ToolCalls) == 0 {
@@ -79,7 +91,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) {
 			a.session.AddMessage("assistant", content)
 			_ = a.session.Save()
 			a.send(AgentDoneMsg{Content: content, TotalCost: totalCost})
-			a.send(CostUpdateMsg{Cost: totalCost})
+			a.send(CostUpdateMsg{Cost: totalCost, McpDataTokens: totalMcpDataTokens, McpDataCost: totalMcpDataCost})
 			return
 		}
 
@@ -96,6 +108,19 @@ func (a *Agent) Run(ctx context.Context, prompt string) {
 				Content:    result,
 				ToolCallID: tc.ID,
 			})
+
+			// Track MCP data tokens for cost calculation.
+			if tool, ok := a.registry.Get(tc.Name); ok {
+				if _, isMCP := tool.(*mcp.MCPTool); isMCP {
+					tokens := len(result) / 4
+					totalMcpDataTokens += tokens
+					if lastInputRate > 0 {
+						mcpCost := float64(tokens) * lastInputRate
+						totalMcpDataCost += mcpCost
+						totalCost += mcpCost
+					}
+				}
+			}
 		}
 	}
 
@@ -103,6 +128,8 @@ func (a *Agent) Run(ctx context.Context, prompt string) {
 }
 
 // executeTool looks up and runs a single tool call, returning the result string.
+// This works generically for both built-in tools and MCP tools registered
+// dynamically at runtime. MCP errors are surfaced as tool execution errors.
 func (a *Agent) executeTool(ctx context.Context, tc ToolCall) string {
 	tool, ok := a.registry.Get(tc.Name)
 	if !ok {

@@ -4,7 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/omnicli/omnicli/internal/mcp"
 )
 
 func TestLoadFile(t *testing.T) {
@@ -125,5 +128,77 @@ func TestDefaults(t *testing.T) {
 
 	if (cfg.Theme != ThemeConfig{}) {
 		t.Errorf("Theme = %+v, want zero value", cfg.Theme)
+	}
+}
+
+func TestMerge_McpServers(t *testing.T) {
+	dst := &Config{McpServers: map[string]mcp.ServerConfig{"a": {Type: "stdio", Command: "a"}}}
+	src := &Config{McpServers: map[string]mcp.ServerConfig{"b": {Type: "sse", URL: "http://b"}}}
+	merge(dst, src)
+	if len(dst.McpServers) != 2 {
+		t.Errorf("len = %d, want 2", len(dst.McpServers))
+	}
+	if _, ok := dst.McpServers["a"]; !ok {
+		t.Error("expected a to remain")
+	}
+	if _, ok := dst.McpServers["b"]; !ok {
+		t.Error("expected b to be added")
+	}
+}
+
+func TestMerge_McpServersOverride(t *testing.T) {
+	dst := &Config{McpServers: map[string]mcp.ServerConfig{"a": {Type: "stdio", Command: "old"}}}
+	src := &Config{McpServers: map[string]mcp.ServerConfig{"a": {Type: "stdio", Command: "new"}}}
+	merge(dst, src)
+	if dst.McpServers["a"].Command != "new" {
+		t.Errorf("command = %q, want new", dst.McpServers["a"].Command)
+	}
+}
+
+func TestValidateMCPServer(t *testing.T) {
+	tests := []struct {
+		name    string
+		srv     mcp.ServerConfig
+		wantErr string
+	}{
+		{"stdio ok", mcp.ServerConfig{Type: "stdio", Command: "echo"}, ""},
+		{"stdio missing command", mcp.ServerConfig{Type: "stdio"}, "command is required"},
+		{"sse ok", mcp.ServerConfig{Type: "sse", URL: "http://x"}, ""},
+		{"sse missing url", mcp.ServerConfig{Type: "sse"}, "url is required"},
+		{"unknown type", mcp.ServerConfig{Type: "ws"}, "unknown transport type"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateMCPServer(tt.srv)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %v, want containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoad_InvalidMcpServersDropped(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldWd, _ := os.Getwd()
+	os.Chdir(tmpDir)
+	defer os.Chdir(oldWd)
+
+	projectJSON := `{"mcp_servers":{"bad":{"type":"stdio"}}}`
+	if err := os.WriteFile("omnisettings.json", []byte(projectJSON), 0o644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	cfg, err := Load()
+	if err == nil {
+		t.Fatal("expected error for invalid MCP config")
+	}
+	if len(cfg.McpServers) != 0 {
+		t.Errorf("expected invalid servers to be dropped, got %d", len(cfg.McpServers))
 	}
 }

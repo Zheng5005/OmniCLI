@@ -80,6 +80,11 @@ func (m *InputModel) SetEnabled(enabled bool) {
 	}
 }
 
+// SetWidth updates the textarea width.
+func (m *InputModel) SetWidth(width int) {
+	m.textarea.SetWidth(width)
+}
+
 // Reset clears the textarea content and refocuses it.
 func (m *InputModel) Reset() {
 	m.textarea.Reset()

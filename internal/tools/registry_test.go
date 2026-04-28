@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sync"
 	"testing"
 )
 
@@ -84,11 +86,118 @@ func TestRegistry_Filter(t *testing.T) {
 				}
 			}
 
-			// Verify original registry is untouched.
-			original := r.List()
-			if len(original) != tt.originalLen {
-				t.Errorf("original registry len = %d, want %d", len(original), tt.originalLen)
-			}
-		})
+		// Verify original registry is untouched.
+		original := r.List()
+		if len(original) != tt.originalLen {
+			t.Errorf("original registry len = %d, want %d", len(original), tt.originalLen)
+		}
+	})
+	}
+}
+
+func TestRegistry_Deregister(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&mockTool{nameVal: "server1__tool_a"})
+	r.Register(&mockTool{nameVal: "server1__tool_b"})
+	r.Register(&mockTool{nameVal: "server2__tool_a"})
+	r.Register(&mockTool{nameVal: "builtin_tool"})
+
+	r.Deregister("server1")
+
+	tools := r.List()
+	if len(tools) != 2 {
+		t.Fatalf("expected 2 tools after deregister, got %d", len(tools))
+	}
+
+	names := make(map[string]bool)
+	for _, tool := range tools {
+		names[tool.Name()] = true
+	}
+
+	if names["server1__tool_a"] {
+		t.Error("expected server1__tool_a to be deregistered")
+	}
+	if names["server1__tool_b"] {
+		t.Error("expected server1__tool_b to be deregistered")
+	}
+	if !names["server2__tool_a"] {
+		t.Error("expected server2__tool_a to remain")
+	}
+	if !names["builtin_tool"] {
+		t.Error("expected builtin_tool to remain")
+	}
+}
+
+func TestRegistry_ConcurrentAccess(t *testing.T) {
+	r := NewRegistry()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(3)
+		go func(n int) {
+			defer wg.Done()
+			r.Register(&mockTool{nameVal: fmt.Sprintf("tool_%d", n)})
+		}(i)
+		go func(n int) {
+			defer wg.Done()
+			r.Get(fmt.Sprintf("tool_%d", n))
+		}(i)
+		go func() {
+			defer wg.Done()
+			r.List()
+		}()
+	}
+	wg.Wait()
+
+	// All registrations should have succeeded.
+	tools := r.List()
+	if len(tools) != 100 {
+		t.Errorf("expected 100 tools, got %d", len(tools))
+	}
+}
+
+func TestRegistry_DeregisterPrefixEdgeCases(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&mockTool{nameVal: "server1__tool"})
+	r.Register(&mockTool{nameVal: "server10__tool"})
+	r.Register(&mockTool{nameVal: "__tool"})
+
+	r.Deregister("server1")
+
+	tools := r.List()
+	names := make(map[string]bool)
+	for _, t := range tools {
+		names[t.Name()] = true
+	}
+	if names["server1__tool"] {
+		t.Error("expected server1__tool to be removed")
+	}
+	if !names["server10__tool"] {
+		t.Error("expected server10__tool to remain")
+	}
+	if !names["__tool"] {
+		t.Error("expected __tool to remain")
+	}
+}
+
+func TestRegistry_ConcurrentDeregister(t *testing.T) {
+	r := NewRegistry()
+	for i := 0; i < 50; i++ {
+		r.Register(&mockTool{nameVal: fmt.Sprintf("srv__tool%d", i)})
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.Deregister("srv")
+		}()
+	}
+	wg.Wait()
+
+	tools := r.List()
+	if len(tools) != 0 {
+		t.Errorf("expected 0 tools, got %d", len(tools))
 	}
 }

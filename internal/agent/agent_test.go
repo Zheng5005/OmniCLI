@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/omnicli/omnicli/internal/history"
+	"github.com/omnicli/omnicli/internal/mcp"
 	"github.com/omnicli/omnicli/internal/tools"
 )
 
@@ -279,4 +282,89 @@ func TestRecreateSession(t *testing.T) {
 			t.Errorf("model name = %s, want gemini-1.5-flash", ag.ModelName())
 		}
 	})
+}
+
+// agentMockTransport implements mcp.Transport for testing.
+type agentMockTransport struct {
+	result json.RawMessage
+}
+
+func (m *agentMockTransport) Send(ctx context.Context, req mcp.JSONRPCRequest) (mcp.JSONRPCResponse, error) {
+	return mcp.JSONRPCResponse{Result: m.result}, nil
+}
+
+func (m *agentMockTransport) Notify(ctx context.Context, method string, params json.RawMessage) error {
+	return nil
+}
+
+func (m *agentMockTransport) Close() error {
+	return nil
+}
+
+func TestAgentRun_MCPToolDataCost(t *testing.T) {
+	resultText := strings.Repeat("a", 400)
+	raw, err := json.Marshal(mcp.CallToolResult{
+		Content: []mcp.ToolContent{{Type: "text", Text: resultText}},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	mt := &agentMockTransport{result: raw}
+	mcpClient := mcp.NewClient("test", mcp.ServerConfig{}, mt)
+	mcpTool := mcp.NewMCPTool("test", mcp.McpToolDef{
+		Name:        "echo",
+		Description: "Echo",
+		InputSchema: json.RawMessage(`{"type":"object"}`),
+	}, mcpClient, true, nil)
+
+	llm := &mockLLMClient{
+		responses: []*ChatMessage{
+			{
+				Role: "assistant",
+				ToolCalls: []ToolCall{
+					{ID: "1", Name: "test__echo", Arguments: `{}`},
+				},
+			},
+			{Role: "assistant", Content: "Done"},
+		},
+		usages: []*Usage{
+			{PromptTokens: 100, CompletionTokens: 50, TotalTokens: 150, Cost: 0.01, InputCost: 0.005, OutputCost: 0.005},
+			{PromptTokens: 200, CompletionTokens: 100, TotalTokens: 300, Cost: 0.02, InputCost: 0.01, OutputCost: 0.01},
+		},
+	}
+
+	registry := tools.NewRegistry()
+	registry.Register(mcpTool)
+
+	session := history.NewSession(t.TempDir())
+	c := &collector{}
+	ag := New(llm, registry, session, c.send)
+	ag.Run(context.Background(), "run")
+
+	var lastCost *CostUpdateMsg
+	for _, msg := range c.get() {
+		if m, ok := msg.(CostUpdateMsg); ok {
+			lastCost = &m
+		}
+	}
+	if lastCost == nil {
+		t.Fatal("expected CostUpdateMsg")
+	}
+
+	// 400 chars / 4 = 100 tokens.
+	// Input rate from first usage: 0.005 / 100 = 0.00005 per token.
+	// MCP data cost: 100 * 0.00005 = 0.005.
+	// Total cost: 0.01 + 0.005 + 0.02 = 0.035.
+	wantCost := 0.035
+	if math.Abs(lastCost.Cost-wantCost) > 1e-9 {
+		t.Errorf("Cost = %f, want %f", lastCost.Cost, wantCost)
+	}
+	if lastCost.McpDataTokens != 100 {
+		t.Errorf("McpDataTokens = %d, want 100", lastCost.McpDataTokens)
+	}
+	wantMcpDataCost := 0.005
+	if math.Abs(lastCost.McpDataCost-wantMcpDataCost) > 1e-9 {
+		t.Errorf("McpDataCost = %f, want %f", lastCost.McpDataCost, wantMcpDataCost)
+	}
 }

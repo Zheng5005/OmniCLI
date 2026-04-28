@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 )
@@ -49,11 +50,14 @@ func (a Activity) color() lipgloss.Color {
 
 // StatusBarModel renders a full-width status bar with model name, activity, and cost.
 type StatusBarModel struct {
-	model    string
-	cost     float64
-	activity Activity
-	width    int
-	skill    string
+	model       string
+	cost        float64
+	activity    Activity
+	width       int
+	skill       string
+	mcpStatus   string
+	flash       string
+	flashExpiry time.Time
 }
 
 // NewStatusBarModel creates a new status bar for the given model name and width.
@@ -79,6 +83,15 @@ func (m *StatusBarModel) SetModel(name string) { m.model = name }
 // SetSkill updates the displayed skill name.
 func (m *StatusBarModel) SetSkill(name string) { m.skill = name }
 
+// SetMCPStatus updates the displayed MCP server status summary.
+func (m *StatusBarModel) SetMCPStatus(status string) { m.mcpStatus = status }
+
+// SetFlash sets a brief flash message to display in the status bar.
+func (m *StatusBarModel) SetFlash(text string, duration time.Duration) {
+	m.flash = text
+	m.flashExpiry = time.Now().Add(duration)
+}
+
 // View renders the status bar spanning the full terminal width.
 func (m StatusBarModel) View() string {
 	bg := lipgloss.Color("236")
@@ -99,8 +112,19 @@ func (m StatusBarModel) View() string {
 		Foreground(lipgloss.Color("7")).
 		Padding(0, 1)
 
-	left := leftStyle.Render(m.model)
-	center := centerStyle.Render(m.activity.String())
+	leftText := m.model
+	if m.mcpStatus != "" {
+		leftText += " " + m.mcpStatus
+	}
+	left := leftStyle.Render(leftText)
+
+	centerText := m.activity.String()
+	if m.flash != "" && time.Now().Before(m.flashExpiry) {
+		centerText = m.flash
+	} else {
+		m.flash = ""
+	}
+	center := centerStyle.Render(centerText)
 
 	rightContent := fmt.Sprintf("$%.4f", m.cost)
 	if m.skill != "" {

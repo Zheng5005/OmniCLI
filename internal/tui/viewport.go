@@ -78,6 +78,17 @@ func (m *ViewportModel) AppendSystem(text string) {
 	m.viewport.GotoBottom()
 }
 
+// AppendMarkdown renders markdown content and appends it to the viewport.
+func (m *ViewportModel) AppendMarkdown(text string) {
+	rendered, err := m.renderer.Render(text)
+	if err != nil {
+		rendered = text
+	}
+	m.content += strings.TrimRight(rendered, "\n") + "\n"
+	m.viewport.SetContent(m.content + m.streaming)
+	m.viewport.GotoBottom()
+}
+
 // SetSize resizes the viewport and recreates the glamour renderer.
 func (m *ViewportModel) SetSize(width, height int) {
 	m.width = width

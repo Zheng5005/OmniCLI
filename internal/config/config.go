@@ -8,8 +8,12 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"github.com/omnicli/omnicli/internal/mcp"
 )
 
 // ThemeConfig holds terminal color theming preferences.
@@ -21,9 +25,10 @@ type ThemeConfig struct {
 
 // Config holds the full application configuration.
 type Config struct {
-	ModelPriority   []string    `json:"modelPriority"`
-	AllowedCommands []string    `json:"allowedCommands"`
-	Theme           ThemeConfig `json:"theme"`
+	ModelPriority   []string                    `json:"modelPriority"`
+	AllowedCommands []string                    `json:"allowedCommands"`
+	Theme           ThemeConfig                 `json:"theme"`
+	McpServers      map[string]mcp.ServerConfig `json:"mcp_servers"`
 }
 
 // defaults returns the built-in default configuration.
@@ -78,7 +83,35 @@ func Load() (*Config, error) {
 		}
 	}
 
+	// Validate MCP server configurations and drop invalid entries.
+	var invalid []string
+	for name, srv := range base.McpServers {
+		if err := validateMCPServer(srv); err != nil {
+			invalid = append(invalid, fmt.Sprintf("%s: %v", name, err))
+			delete(base.McpServers, name)
+		}
+	}
+	if len(invalid) > 0 {
+		return base, fmt.Errorf("invalid MCP server configurations: %s", strings.Join(invalid, "; "))
+	}
+
 	return base, nil
+}
+
+func validateMCPServer(srv mcp.ServerConfig) error {
+	switch srv.Type {
+	case "stdio":
+		if srv.Command == "" {
+			return fmt.Errorf("command is required for stdio transport")
+		}
+	case "sse":
+		if srv.URL == "" {
+			return fmt.Errorf("url is required for sse transport")
+		}
+	default:
+		return fmt.Errorf("unknown transport type %q", srv.Type)
+	}
+	return nil
 }
 
 // loadFile reads and unmarshals a JSON config file. It returns the parsed
@@ -108,5 +141,13 @@ func merge(dst, src *Config) {
 	}
 	if (src.Theme != ThemeConfig{}) {
 		dst.Theme = src.Theme
+	}
+	if len(src.McpServers) > 0 {
+		if dst.McpServers == nil {
+			dst.McpServers = make(map[string]mcp.ServerConfig)
+		}
+		for k, v := range src.McpServers {
+			dst.McpServers[k] = v
+		}
 	}
 }

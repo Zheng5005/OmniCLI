@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strings"
+	"sync"
 )
 
 // Tool defines the interface for all agent tools.
@@ -21,6 +23,7 @@ type Tool interface {
 // Registry holds registered tools and provides lookup by name.
 type Registry struct {
 	tools map[string]Tool
+	mu    sync.RWMutex
 }
 
 // NewRegistry creates a new empty tool registry.
@@ -33,18 +36,24 @@ func NewRegistry() *Registry {
 // Register adds a tool to the registry. If a tool with the same name
 // already exists, it is replaced.
 func (r *Registry) Register(t Tool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.tools[t.Name()] = t
 }
 
 // Get retrieves a tool by name. Returns the tool and true if found,
 // or nil and false if not found.
 func (r *Registry) Get(name string) (Tool, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	t, ok := r.tools[name]
 	return t, ok
 }
 
 // List returns all registered tools sorted by name.
 func (r *Registry) List() []Tool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	result := make([]Tool, 0, len(r.tools))
 	for _, t := range r.tools {
 		result = append(result, t)
@@ -59,6 +68,9 @@ func (r *Registry) List() []Tool {
 // appear in allowedTools. If allowedTools is nil or empty, returns
 // a copy of the full registry.
 func (r *Registry) Filter(allowedTools []string) *Registry {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	filtered := NewRegistry()
 
 	if len(allowedTools) == 0 {
@@ -74,4 +86,18 @@ func (r *Registry) Filter(allowedTools []string) *Registry {
 		}
 	}
 	return filtered
+}
+
+// Deregister removes all tools whose names start with the given prefix
+// followed by "__". This is used to remove tools from a specific MCP
+// server when it disconnects.
+func (r *Registry) Deregister(prefix string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	pattern := prefix + "__"
+	for name := range r.tools {
+		if strings.HasPrefix(name, pattern) {
+			delete(r.tools, name)
+		}
+	}
 }

@@ -192,6 +192,8 @@ func (o *OmniGoClient) ChatStream(ctx context.Context, messages []ChatMessage, t
 		CompletionTokens: resp.Usage.OutputTokens,
 		TotalTokens:      resp.Usage.TotalTokens,
 		Cost:             resp.Cost.TotalCost,
+		InputCost:        resp.Cost.InputCost,
+		OutputCost:       resp.Cost.OutputCost,
 	}
 
 	return result, usage, nil

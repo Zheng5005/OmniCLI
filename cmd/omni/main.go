@@ -1,17 +1,21 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/omnicli/omnicli/internal/agent"
 	"github.com/omnicli/omnicli/internal/config"
 	"github.com/omnicli/omnicli/internal/exec"
 	"github.com/omnicli/omnicli/internal/history"
+	"github.com/omnicli/omnicli/internal/mcp"
 	"github.com/omnicli/omnicli/internal/security"
 	"github.com/omnicli/omnicli/internal/skills"
 	"github.com/omnicli/omnicli/internal/tools"
@@ -19,10 +23,16 @@ import (
 )
 
 func main() {
-	// Check for skill subcommand
-	if len(os.Args) > 1 && os.Args[1] == "skill" {
-		runSkillInit(os.Args[2:])
-		return
+	// Check for subcommands
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "skill":
+			runSkillInit(os.Args[2:])
+			return
+		case "mcp":
+			runMCP(os.Args[2:])
+			return
+		}
 	}
 
 	resume := flag.Bool("resume", false, "Resume the last active session")
@@ -92,6 +102,19 @@ func main() {
 	registry.Register(&tools.GrepSearchTool{})
 	registry.Register(&tools.ReadFileTool{})
 
+	// Initialize MCP manager with configured servers.
+	mcpManager := mcp.NewManager(cfg.McpServers)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := mcpManager.StartAll(ctx); err != nil {
+		log.Printf("Warning: MCP manager start error: %v", err)
+	}
+	cancel()
+	defer func() {
+		if err := mcpManager.StopAll(); err != nil {
+			log.Printf("Warning: MCP manager stop error: %v", err)
+		}
+	}()
+
 	// program is set after tea.NewProgram; the approval callback captures it.
 	var program *tea.Program
 
@@ -107,9 +130,67 @@ func main() {
 	}
 	registry.Register(tools.NewRunCommandTool(safePatterns, approvalFn))
 
+	// MCP approval callback. Trusted servers auto-approve; untrusted servers
+	// send an MCPApprovalRequestMsg to the TUI for user confirmation.
+	mcpApprovalFn := func(serverName, toolName, description, args string) (bool, error) {
+		responseCh := make(chan bool, 1)
+		program.Send(tui.MCPApprovalRequestMsg{
+			ServerName:  serverName,
+			ToolName:    toolName,
+			Description: description,
+			Args:        args,
+			ResponseCh:  responseCh,
+		})
+		approved := <-responseCh
+		return approved, nil
+	}
+
+	// Register MCP tools from all connected servers.
+	for name, status := range mcpManager.Status() {
+		if status.State != "ready" {
+			continue
+		}
+		client := mcpManager.Client(name)
+		if client == nil {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		mcpTools, err := client.ListTools(ctx)
+		cancel()
+		if err != nil {
+			log.Printf("Warning: failed to list tools from MCP server %s: %v", name, err)
+			continue
+		}
+		cfg := client.Config()
+		for _, toolDef := range mcpTools {
+			var schemaMap map[string]any
+			if len(toolDef.InputSchema) > 0 {
+				if err := json.Unmarshal(toolDef.InputSchema, &schemaMap); err != nil {
+					log.Printf("Warning: failed to parse schema for MCP tool %s/%s: %v", name, toolDef.Name, err)
+					continue
+				}
+			}
+			if ok, feature := mcp.ValidateSchema(schemaMap); !ok {
+				log.Printf("Warning: skipping MCP tool %s/%s: unsupported schema feature %q", name, toolDef.Name, feature)
+				continue
+			}
+			registry.Register(mcp.NewMCPTool(name, toolDef, client, cfg.Trusted, mcpApprovalFn))
+		}
+	}
+
 	// Create agent with nil send — wired after program creation.
 	agentInstance := agent.New(llmClient, registry, session, nil)
 	agentInstance.SetClientConfig(models, true)
+	agentInstance.SetMCPManager(mcpManager)
+	agentInstance.SetBaseSystemPrompt(agent.DefaultSystemPrompt)
+
+	// Recreate session with the full tool list (built-in + MCP).
+	if llmClient != nil {
+		allToolNames := agentInstance.AllToolNames()
+		if err := agentInstance.RecreateSession(agent.DefaultSystemPrompt, allToolNames, nil); err != nil {
+			log.Printf("Warning: failed to recreate session with MCP tools: %v", err)
+		}
+	}
 
 	// Build slash router and skill manager.
 	router := tui.NewSlashRouter()
