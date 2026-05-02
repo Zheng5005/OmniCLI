@@ -105,3 +105,12 @@ type WizardCompleteMsg struct{ Values map[string]string }
 
 // WizardCancelledMsg is sent when the user cancels the wizard.
 type WizardCancelledMsg struct{}
+
+// CommandPaletteOpenMsg triggers opening the command palette.
+type CommandPaletteOpenMsg struct{}
+
+// CommandPaletteDismissMsg triggers closing the command palette.
+type CommandPaletteDismissMsg struct{}
+
+// CommandPaletteExecuteMsg triggers execution of a selected palette command.
+type CommandPaletteExecuteMsg struct{ Command string }

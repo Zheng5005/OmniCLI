@@ -12,32 +12,50 @@ import (
 // an optional message to send back to the TUI, plus a command.
 type Handler func(args string) (tea.Msg, tea.Cmd)
 
+// CommandDesc pairs a command name with its description.
+type CommandDesc struct {
+	Name        string
+	Description string
+}
+
 // SlashRouter dispatches slash commands to registered handlers.
 type SlashRouter struct {
-	handlers map[string]Handler
+	handlers     map[string]Handler
+	descriptions map[string]string
 }
 
 // NewSlashRouter creates a router with built-in commands.
 func NewSlashRouter() *SlashRouter {
 	r := &SlashRouter{
-		handlers: make(map[string]Handler),
+		handlers:     make(map[string]Handler),
+		descriptions: make(map[string]string),
 	}
 
 	r.Register("exit", func(args string) (tea.Msg, tea.Cmd) {
 		return ExitMsg{}, nil
 	})
+	r.descriptions["exit"] = "Exit the application"
 
 	r.Register("help", func(args string) (tea.Msg, tea.Cmd) {
-		return SystemMsg{Content: "Available commands: /exit, /help, /mcp, /attach, /detach <uri>, /skills, /skill <name>"}, nil
+		var b strings.Builder
+		b.WriteString("Available commands:\n")
+		for _, desc := range r.Descriptions() {
+			b.WriteString(fmt.Sprintf("  /%s — %s\n", desc.Name, desc.Description))
+		}
+		b.WriteString("\nShortcuts:\n  Ctrl+P — Open command palette")
+		return SystemMsg{Content: b.String()}, nil
 	})
+	r.descriptions["help"] = "Show this help message"
 
 	r.Register("mcp", func(args string) (tea.Msg, tea.Cmd) {
 		return McpServerListMsg{}, nil
 	})
+	r.descriptions["mcp"] = "List MCP servers and their tools"
 
 	r.Register("attach", func(args string) (tea.Msg, tea.Cmd) {
 		return ResourceBrowserOpenMsg{}, nil
 	})
+	r.descriptions["attach"] = "Open the resource browser to attach an MCP resource"
 
 	r.Register("detach", func(args string) (tea.Msg, tea.Cmd) {
 		arg := strings.TrimSpace(args)
@@ -50,10 +68,12 @@ func NewSlashRouter() *SlashRouter {
 		}
 		return ResourceDetachMsg{URI: parts[0]}, nil
 	})
+	r.descriptions["detach"] = "Detach a pinned MCP resource"
 
 	r.Register("skills", func(args string) (tea.Msg, tea.Cmd) {
 		return SystemMsg{Content: "Available skills: (no skills loaded yet)"}, nil
 	})
+	r.descriptions["skills"] = "List available skills"
 
 	r.Register("skill", func(args string) (tea.Msg, tea.Cmd) {
 		if strings.TrimSpace(args) == "" {
@@ -61,6 +81,7 @@ func NewSlashRouter() *SlashRouter {
 		}
 		return SkillActivateMsg{Name: args}, nil
 	})
+	r.descriptions["skill"] = "Activate a skill by name"
 
 	return r
 }
@@ -107,4 +128,18 @@ func (r *SlashRouter) List() []string {
 	}
 	sort.Strings(cmds)
 	return cmds
+}
+
+// Descriptions returns all registered commands with their descriptions.
+func (r *SlashRouter) Descriptions() []CommandDesc {
+	cmds := r.List()
+	descs := make([]CommandDesc, 0, len(cmds))
+	for _, cmd := range cmds {
+		desc := r.descriptions[cmd]
+		if desc == "" {
+			desc = "No description available."
+		}
+		descs = append(descs, CommandDesc{Name: cmd, Description: desc})
+	}
+	return descs
 }

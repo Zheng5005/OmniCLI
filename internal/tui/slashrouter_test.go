@@ -181,3 +181,27 @@ func TestSlashRouterList(t *testing.T) {
 		}
 	}
 }
+
+func TestSlashRouterDescriptions(t *testing.T) {
+	r := NewSlashRouter()
+
+	descs := r.Descriptions()
+	if len(descs) == 0 {
+		t.Fatal("expected non-empty descriptions")
+	}
+
+	for _, d := range descs {
+		if d.Name == "" {
+			t.Error("expected non-empty command name")
+		}
+		if d.Description == "" {
+			t.Errorf("expected non-empty description for command %q", d.Name)
+		}
+	}
+
+	// All registered handlers should have descriptions.
+	cmds := r.List()
+	if len(descs) != len(cmds) {
+		t.Errorf("descriptions count = %d, want %d", len(descs), len(cmds))
+	}
+}

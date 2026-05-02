@@ -393,3 +393,208 @@ func TestModel_McpServerListNoManager(t *testing.T) {
 		t.Errorf("state = %d, want StateNormal", updated.state)
 	}
 }
+
+func TestModel_SpinnerStartsOnStreaming(t *testing.T) {
+	m := NewModel(nil, nil, nil)
+	m.state = StateNormal
+
+	result, cmd := m.Update(SubmitMsg{Content: "hello"})
+	updated := result.(Model)
+
+	if updated.state != StateStreaming {
+		t.Errorf("state = %d, want StateStreaming", updated.state)
+	}
+	if updated.spinner.View() == "" {
+		t.Error("expected non-empty spinner view after entering streaming state")
+	}
+	if cmd == nil {
+		t.Error("expected non-nil cmd (spinner tick)")
+	}
+}
+
+func TestModel_SpinnerStopsOnNormal(t *testing.T) {
+	m := NewModel(nil, nil, nil)
+	m.state = StateStreaming
+	m.statusBar.SetActivity(ActivityThinking)
+
+	result, _ := m.Update(agent.AgentDoneMsg{Content: "done"})
+	updated := result.(Model)
+
+	if updated.state != StateNormal {
+		t.Errorf("state = %d, want StateNormal", updated.state)
+	}
+}
+
+func TestModel_SpinnerTickAdvances(t *testing.T) {
+	m := NewModel(nil, nil, nil)
+	m.state = StateStreaming
+
+	firstFrame := m.spinner.View()
+
+	// Simulate a tick
+	result, _ := m.Update(m.spinner.Tick())
+	updated := result.(Model)
+
+	secondFrame := updated.spinner.View()
+	if firstFrame == secondFrame {
+		t.Error("expected spinner frame to change after tick")
+	}
+}
+
+func TestModel_SpinnerTickIgnoredInNormal(t *testing.T) {
+	m := NewModel(nil, nil, nil)
+	m.state = StateNormal
+
+	result, cmd := m.Update(m.spinner.Tick())
+	updated := result.(Model)
+
+	if updated.state != StateNormal {
+		t.Errorf("state = %d, want StateNormal", updated.state)
+	}
+	if cmd != nil {
+		t.Error("expected nil cmd for tick in normal state")
+	}
+}
+
+func TestModel_CtrlPOpensPaletteInNormal(t *testing.T) {
+	m := NewModel(nil, NewSlashRouter(), nil)
+	m.state = StateNormal
+
+	result, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ctrl+p")})
+	updated := result.(Model)
+
+	if updated.state != StateCommandPalette {
+		t.Errorf("state = %d, want StateCommandPalette", updated.state)
+	}
+	if !updated.showCommandPalette {
+		t.Error("expected showCommandPalette true")
+	}
+	if cmd == nil {
+		t.Error("expected non-nil cmd (textinput blink)")
+	}
+}
+
+func TestModel_CtrlPBlockedDuringOverlays(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*Model)
+		state State
+	}{
+		{
+			name:  "streaming",
+			state: StateStreaming,
+		},
+		{
+			name: "awaiting approval",
+			setup: func(m *Model) {
+				m.pendingApproval = &ApprovalRequestMsg{
+					Command:        "ls",
+					Classification: "safe",
+					ResponseCh:     make(chan bool, 1),
+				}
+			},
+			state: StateAwaitingApproval,
+		},
+		{
+			name: "mcp approval",
+			setup: func(m *Model) {
+				ch := make(chan bool, 1)
+				m.pendingMCPApproval = &MCPApprovalRequestMsg{
+					ServerName: "test",
+					ToolName:   "tool",
+					ResponseCh: ch,
+				}
+				m.approvalDialog = NewApprovalDialog("test", "tool", "desc", "", ch)
+			},
+			state: StateMcpApproval,
+		},
+		{
+			name: "wizard",
+			setup: func(m *Model) {
+				m.wizard = NewVariableWizard("test", []string{"name"}, map[string]string{"name": "desc"})
+				m.wizard.SetSize(80, 24)
+			},
+			state: StateWizard,
+		},
+		{
+			name:  "resource browser",
+			state: StateResourceBrowser,
+		},
+		{
+			name: "command palette",
+			setup: func(m *Model) {
+				m.commandPalette = *NewCommandPalette(m.router.Descriptions())
+				m.commandPalette.SetSize(80, 24)
+			},
+			state: StateCommandPalette,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := NewModel(nil, NewSlashRouter(), nil)
+			m.state = tt.state
+			if tt.setup != nil {
+				tt.setup(&m)
+			}
+
+			result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ctrl+p")})
+			updated := result.(Model)
+
+			if updated.state != tt.state {
+				t.Errorf("state changed from %d to %d, expected unchanged", tt.state, updated.state)
+			}
+		})
+	}
+}
+
+func TestModel_PaletteFlow_OpenEscClose(t *testing.T) {
+	m := NewModel(nil, NewSlashRouter(), nil)
+	m.state = StateNormal
+
+	// Ctrl+P opens palette
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ctrl+p")})
+	updated := result.(Model)
+	if updated.state != StateCommandPalette {
+		t.Fatalf("state = %d, want StateCommandPalette", updated.state)
+	}
+
+	// Esc closes palette
+	result2, cmd := updated.Update(CommandPaletteDismissMsg{})
+	updated2 := result2.(Model)
+	if updated2.state != StateNormal {
+		t.Errorf("state = %d, want StateNormal after dismiss", updated2.state)
+	}
+	if updated2.showCommandPalette {
+		t.Error("expected showCommandPalette false after dismiss")
+	}
+	if cmd != nil {
+		t.Error("expected nil cmd after dismiss")
+	}
+}
+
+func TestModel_PaletteFlow_EnterDispatches(t *testing.T) {
+	m := NewModel(nil, NewSlashRouter(), nil)
+	m.state = StateNormal
+
+	// Ctrl+P opens palette
+	result, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("ctrl+p")})
+	updated := result.(Model)
+
+	// Enter on first item dispatches command
+	result2, cmd := updated.Update(CommandPaletteExecuteMsg{Command: "help"})
+	updated2 := result2.(Model)
+	if updated2.state != StateNormal {
+		t.Errorf("state = %d, want StateNormal after execute", updated2.state)
+	}
+	if updated2.showCommandPalette {
+		t.Error("expected showCommandPalette false after execute")
+	}
+	if cmd == nil {
+		t.Fatal("expected cmd after execute, got nil")
+	}
+	msg := cmd()
+	if _, ok := msg.(SystemMsg); !ok {
+		t.Errorf("expected SystemMsg from /help dispatch, got %T", msg)
+	}
+}

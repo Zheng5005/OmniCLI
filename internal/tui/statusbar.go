@@ -71,6 +71,11 @@ func NewStatusBarModel(modelName string, width int) StatusBarModel {
 // SetActivity updates the displayed activity.
 func (m *StatusBarModel) SetActivity(a Activity) { m.activity = a }
 
+// SetActivityWithSpinner updates the displayed activity and stores the spinner frame.
+func (m *StatusBarModel) SetActivityWithSpinner(a Activity, spinnerFrame string) {
+	m.activity = a
+}
+
 // SetCost updates the displayed cumulative cost.
 func (m *StatusBarModel) SetCost(cost float64) { m.cost = cost }
 
@@ -93,7 +98,7 @@ func (m *StatusBarModel) SetFlash(text string, duration time.Duration) {
 }
 
 // View renders the status bar spanning the full terminal width.
-func (m StatusBarModel) View() string {
+func (m StatusBarModel) View(spinnerView string) string {
 	bg := lipgloss.Color("236")
 
 	leftStyle := lipgloss.NewStyle().
@@ -106,6 +111,10 @@ func (m StatusBarModel) View() string {
 		Background(bg).
 		Foreground(m.activity.color()).
 		Padding(0, 1)
+
+	if m.activity != ActivityReady {
+		centerStyle = centerStyle.Bold(true)
+	}
 
 	rightStyle := lipgloss.NewStyle().
 		Background(bg).
@@ -123,6 +132,9 @@ func (m StatusBarModel) View() string {
 		centerText = m.flash
 	} else {
 		m.flash = ""
+	}
+	if spinnerView != "" {
+		centerText = spinnerView + " " + centerText
 	}
 	center := centerStyle.Render(centerText)
 

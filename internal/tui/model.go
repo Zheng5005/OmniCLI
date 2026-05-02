@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/omnicli/omnicli/internal/agent"
@@ -35,6 +36,8 @@ const (
 	StateMcpApproval
 	// StateResourceBrowser is active while the resource picker is displayed.
 	StateResourceBrowser
+	// StateCommandPalette is active while the command palette is displayed.
+	StateCommandPalette
 )
 
 // Model is the root Bubble Tea model composing input, viewport, and status bar.
@@ -58,6 +61,9 @@ type Model struct {
 	router             *SlashRouter
 	wizard             VariableWizard
 	showWizard         bool
+	commandPalette     CommandPalette
+	showCommandPalette bool
+	spinner            spinner.Model
 	activeSkill        *skills.Skill
 	skillManager       *skills.Manager
 }
@@ -72,6 +78,14 @@ func NewModel(agentInstance *agent.Agent, router *SlashRouter, skillManager *ski
 		modelName = agentInstance.ModelName()
 	}
 
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+
+	var palette CommandPalette
+	if router != nil {
+		palette = *NewCommandPalette(router.Descriptions())
+	}
+
 	return Model{
 		input:           NewInputModel(),
 		viewport:        NewViewportModel(w, h-inputHeight-statusBarHeight-padding),
@@ -82,6 +96,8 @@ func NewModel(agentInstance *agent.Agent, router *SlashRouter, skillManager *ski
 		height:          h,
 		resourcePanel:   NewResourcePanel(),
 		resourceBrowser: NewResourceBrowser(w, h),
+		commandPalette:  palette,
+		spinner:         s,
 		ctx:             ctx,
 		cancel:          cancel,
 		router:          router,
@@ -109,6 +125,11 @@ func (m *Model) LoadHistory(entries []HistoryEntry) {
 	}
 }
 
+// setSpinnerStyle updates the spinner color to match the given activity.
+func (m *Model) setSpinnerStyle(a Activity) {
+	m.spinner.Style = lipgloss.NewStyle().Foreground(a.color())
+}
+
 // Init returns the initial command to query terminal dimensions.
 func (m Model) Init() tea.Cmd {
 	return tea.WindowSize()
@@ -128,6 +149,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.resourcePanel.Toggle()
 				m.recalcLayout()
 				return m, nil
+			}
+		case "ctrl+p":
+			if m.state == StateNormal {
+				m.state = StateCommandPalette
+				m.showCommandPalette = true
+				m.commandPalette = *NewCommandPalette(m.router.Descriptions())
+				m.commandPalette.SetSize(m.width, m.height)
+				return m, m.commandPalette.Init()
 			}
 		}
 
@@ -181,6 +210,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		if m.state == StateCommandPalette {
+			model, cmd := m.commandPalette.Update(msg)
+			m.commandPalette = model.(CommandPalette)
+			return m, cmd
+		}
+
 		if m.state == StateNormal {
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(msg)
@@ -188,6 +223,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		return m, nil
+
+	case spinner.TickMsg:
+		if m.state == StateNormal {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -199,6 +242,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.showResourceBrowser {
 			m.resourceBrowser.SetSize(msg.Width, msg.Height)
+		}
+		if m.showCommandPalette {
+			m.commandPalette.SetSize(msg.Width, msg.Height)
 		}
 		return m, nil
 
@@ -219,14 +265,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = StateStreaming
 		m.input.SetEnabled(false)
 		m.statusBar.SetActivity(ActivityThinking)
+		m.setSpinnerStyle(ActivityThinking)
 
 		agentRef := m.agent
 		ctx := m.ctx
 		prompt := msg.Content
-		return m, func() tea.Msg {
-			go agentRef.Run(ctx, prompt)
-			return nil
-		}
+		return m, tea.Batch(
+			m.spinner.Tick,
+			func() tea.Msg {
+				go agentRef.Run(ctx, prompt)
+				return nil
+			},
+		)
 
 	case ExitMsg:
 		m.cancel()
@@ -262,7 +312,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.wizard.SetSize(m.width, m.height)
 			m.showWizard = true
 			m.state = StateWizard
-			return m, m.wizard.Init()
+			m.statusBar.SetActivity(ActivityThinking)
+			m.setSpinnerStyle(ActivityThinking)
+			return m, tea.Batch(m.spinner.Tick, m.wizard.Init())
 		}
 		m.activateSkill(skill, make(map[string]string))
 		return m, nil
@@ -289,8 +341,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case agent.ToolCallMsg:
 		if msg.Name == "run_command" {
 			m.statusBar.SetActivity(ActivityExecuting)
+			m.setSpinnerStyle(ActivityExecuting)
 		} else {
 			m.statusBar.SetActivity(ActivitySearching)
+			m.setSpinnerStyle(ActivitySearching)
 		}
 		m.viewport.AppendSystem(fmt.Sprintf("🔧 Using tool: %s", msg.Name))
 
@@ -338,6 +392,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				msg.Command, msg.Classification, hint),
 		)
 		m.statusBar.SetActivity(ActivityExecuting)
+		m.setSpinnerStyle(ActivityExecuting)
 		return m, nil
 
 	case MCPApprovalRequestMsg:
@@ -347,6 +402,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.approvalDialog.SetSize(m.width, m.height)
 		m.showApprovalDialog = true
 		m.statusBar.SetActivity(ActivityExecuting)
+		m.setSpinnerStyle(ActivityExecuting)
 		return m, nil
 
 	case McpServerListMsg:
@@ -365,7 +421,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = StateResourceBrowser
 		m.showResourceBrowser = true
 		m.resourceBrowser = NewResourceBrowser(m.width, m.height)
-		return m, m.fetchResourcesCmd()
+		m.statusBar.SetActivity(ActivitySearching)
+		m.setSpinnerStyle(ActivitySearching)
+		return m, tea.Batch(m.spinner.Tick, m.fetchResourcesCmd())
 
 	case ResourceListLoadedMsg:
 		m.resourceBrowser.SetItems(msg.Items)
@@ -391,6 +449,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ResourceErrorMsg:
 		m.viewport.AppendSystem(fmt.Sprintf("⚠️ Resource error: %s", msg.Err))
+		return m, nil
+
+	case CommandPaletteDismissMsg:
+		m.showCommandPalette = false
+		m.state = StateNormal
+		return m, nil
+
+	case CommandPaletteExecuteMsg:
+		m.showCommandPalette = false
+		m.state = StateNormal
+		handled, routerMsg, cmd := m.router.Dispatch("/" + msg.Command)
+		if handled {
+			if routerMsg != nil {
+				return m, func() tea.Msg {
+					return routerMsg
+				}
+			}
+			return m, cmd
+		}
 		return m, nil
 	}
 
@@ -697,6 +774,11 @@ func (m *Model) updateMCPStatus() {
 
 // View renders the full TUI layout.
 func (m Model) View() string {
+	spinnerView := ""
+	if m.state != StateNormal {
+		spinnerView = m.spinner.View()
+	}
+
 	var view string
 	if m.resourcePanel.Visible() {
 		view = lipgloss.JoinHorizontal(lipgloss.Top,
@@ -705,13 +787,13 @@ func (m Model) View() string {
 		)
 		view = lipgloss.JoinVertical(lipgloss.Left,
 			view,
-			m.statusBar.View(),
+			m.statusBar.View(spinnerView),
 			m.input.View(),
 		)
 	} else {
 		view = lipgloss.JoinVertical(lipgloss.Left,
 			m.viewport.View(),
-			m.statusBar.View(),
+			m.statusBar.View(spinnerView),
 			m.input.View(),
 		)
 	}
@@ -738,6 +820,14 @@ func (m Model) View() string {
 			m.resourceBrowser.View(),
 		)
 		return browserOverlay
+	}
+
+	if m.showCommandPalette {
+		paletteOverlay := lipgloss.Place(m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			m.commandPalette.View(),
+		)
+		return paletteOverlay
 	}
 
 	return view
