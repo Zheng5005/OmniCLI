@@ -38,6 +38,8 @@ const (
 	StateResourceBrowser
 	// StateCommandPalette is active while the command palette is displayed.
 	StateCommandPalette
+	// StateSubAgent is active while a sub-agent is executing.
+	StateSubAgent
 )
 
 // Model is the root Bubble Tea model composing input, viewport, and status bar.
@@ -47,6 +49,7 @@ type Model struct {
 	statusBar          StatusBarModel
 	agent              *agent.Agent
 	state              State
+	previousState      State
 	width              int
 	height             int
 	pendingApproval    *ApprovalRequestMsg
@@ -380,7 +383,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusBar.SetActivity(ActivityReady)
 		return m, nil
 
+	case agent.SubAgentStartMsg:
+		m.previousState = m.state
+		m.state = StateSubAgent
+		m.input.SetEnabled(false)
+		m.statusBar.SetActivity(ActivitySearching)
+		m.statusBar.SetSubAgentSkill(msg.SkillName)
+		m.setSpinnerStyle(ActivitySearching)
+		m.viewport.AppendSubAgentLog(msg.SkillName, "start", "sub-agent started")
+		return m, m.spinner.Tick
+
+	case agent.SubAgentLogMsg:
+		m.viewport.AppendSubAgentLog(msg.SkillName, msg.Activity, msg.Detail)
+		return m, nil
+
+	case agent.SubAgentDoneMsg:
+		m.viewport.AppendSubAgentLog(msg.SkillName, "done", msg.Result.Summary)
+		if msg.Result.Error != "" {
+			m.viewport.AppendSubAgentLog(msg.SkillName, "error", msg.Result.Error)
+		}
+		m.state = m.previousState
+		if m.state == StateNormal {
+			m.input.SetEnabled(true)
+			m.statusBar.SetActivity(ActivityReady)
+		}
+		m.statusBar.SetSubAgentSkill("")
+		m.updateMCPStatus()
+		return m, nil
+
 	case ApprovalRequestMsg:
+		m.previousState = m.state
 		m.state = StateAwaitingApproval
 		m.pendingApproval = &msg
 		hint := "[y] to run, [n] to deny"
@@ -514,7 +546,7 @@ func (m Model) handleApprovalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	m.pendingApproval = nil
-	m.state = StateStreaming
+	m.state = m.previousState
 	return m, nil
 }
 

@@ -12,6 +12,14 @@ import (
 
 var systemStyle = lipgloss.NewStyle().Italic(true).Faint(true)
 
+var (
+	subAgentInfoStyle     = lipgloss.NewStyle()
+	subAgentToolStyle     = lipgloss.NewStyle().Faint(true)
+	subAgentThinkingStyle = lipgloss.NewStyle().Italic(true)
+	subAgentErrorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
+	subAgentDoneStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("2")).Bold(true)
+)
+
 // ViewportModel manages the scrollable chat display with markdown rendering.
 type ViewportModel struct {
 	viewport  viewport.Model
@@ -74,6 +82,38 @@ func (m *ViewportModel) FinalizeResponse() {
 // AppendSystem appends a styled system message to the viewport.
 func (m *ViewportModel) AppendSystem(text string) {
 	m.content += systemStyle.Render(text) + "\n"
+	m.viewport.SetContent(m.content + m.streaming)
+	m.viewport.GotoBottom()
+}
+
+// AppendSubAgentLog appends a sub-agent log entry with styling based on the activity type.
+func (m *ViewportModel) AppendSubAgentLog(skillName, activity, detail string) {
+	prefix := "[" + skillName + "] "
+	var style lipgloss.Style
+	var text string
+
+	switch activity {
+	case "start":
+		style = subAgentInfoStyle
+		text = prefix + detail
+	case "tool_call":
+		style = subAgentToolStyle
+		text = prefix + "Tool: " + detail
+	case "response":
+		style = subAgentThinkingStyle
+		text = prefix + detail
+	case "done":
+		style = subAgentDoneStyle
+		text = prefix + detail
+	case "error":
+		style = subAgentErrorStyle
+		text = prefix + detail
+	default:
+		style = subAgentInfoStyle
+		text = prefix + detail
+	}
+
+	m.content += style.Render(text) + "\n"
 	m.viewport.SetContent(m.content + m.streaming)
 	m.viewport.GotoBottom()
 }
