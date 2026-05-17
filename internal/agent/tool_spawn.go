@@ -104,8 +104,16 @@ func (t *SpawnSubAgentTool) Execute(ctx context.Context, args json.RawMessage) (
 
 	filtered := t.tools.Filter(skill.Tools)
 
+	if t.send != nil {
+		t.send(SubAgentStartMsg{SkillName: a.SkillName, Prompt: a.SubTaskPrompt})
+	}
+
 	subAgent := NewSubAgent(a.SkillName, a.SubTaskPrompt, a.ContextFiles, llmClient, t.skills, filtered, t.send)
 	result := subAgent.Run(ctx)
+
+	if t.send != nil {
+		t.send(SubAgentDoneMsg{SkillName: a.SkillName, Result: result})
+	}
 
 	resultJSON, err := json.Marshal(result)
 	if err != nil {
