@@ -10,21 +10,35 @@ import (
 	"github.com/omnicli/omnicli/internal/tools"
 )
 
+// subAgentClientFactory creates an LLMClient for a sub-agent. It is abstracted
+// to allow mocking in unit tests.
+type subAgentClientFactory interface {
+	create(systemPrompt string, toolNames []string) (LLMClient, error)
+}
+
+type omnigoClientFactory struct {
+	client *omnigo.Client
+}
+
+func (f *omnigoClientFactory) create(systemPrompt string, toolNames []string) (LLMClient, error) {
+	return NewOmniGoClientFromClient(f.client, systemPrompt, toolNames)
+}
+
 // SpawnSubAgentTool allows the main agent to delegate tasks to isolated sub-agents.
 type SpawnSubAgentTool struct {
-	client *omnigo.Client
-	skills *skills.Manager
-	tools  *tools.Registry
-	send   SendFunc
+	factory subAgentClientFactory
+	skills  *skills.Manager
+	tools   *tools.Registry
+	send    SendFunc
 }
 
 // NewSpawnSubAgentTool creates the spawn_subagent tool.
 func NewSpawnSubAgentTool(client *omnigo.Client, skills *skills.Manager, tools *tools.Registry, send SendFunc) *SpawnSubAgentTool {
 	return &SpawnSubAgentTool{
-		client: client,
-		skills: skills,
-		tools:  tools,
-		send:   send,
+		factory: &omnigoClientFactory{client: client},
+		skills:  skills,
+		tools:   tools,
+		send:    send,
 	}
 }
 
@@ -83,7 +97,7 @@ func (t *SpawnSubAgentTool) Execute(ctx context.Context, args json.RawMessage) (
 		return "", fmt.Errorf("skill not found: %s", a.SkillName)
 	}
 
-	llmClient, err := NewOmniGoClientFromClient(t.client, skill.SystemPrompt, skill.Tools)
+	llmClient, err := t.factory.create(skill.SystemPrompt, skill.Tools)
 	if err != nil {
 		return "", fmt.Errorf("failed to create sub-agent LLM client: %w", err)
 	}
