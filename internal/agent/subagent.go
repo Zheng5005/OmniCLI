@@ -68,6 +68,8 @@ func (sa *SubAgent) Run(ctx context.Context) SubAgentResult {
 	}
 
 	filtered := sa.tools.Filter(skill.Tools)
+	// Explicitly prevent sub-agents from spawning nested sub-agents (recursion guard).
+	filtered.Deregister("spawn_subagent")
 	toolDefs := buildToolDefs(filtered)
 
 	messages := []ChatMessage{
