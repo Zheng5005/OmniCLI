@@ -106,6 +106,7 @@ func TestModelUpdate(t *testing.T) {
 			name: "approval key y approves",
 			setup: func(m *Model) {
 				m.state = StateAwaitingApproval
+				m.previousState = StateStreaming
 				m.pendingApproval = &ApprovalRequestMsg{
 					Command:        "ls",
 					Classification: "safe",
@@ -127,6 +128,7 @@ func TestModelUpdate(t *testing.T) {
 			name: "approval key n denies",
 			setup: func(m *Model) {
 				m.state = StateAwaitingApproval
+				m.previousState = StateStreaming
 				m.pendingApproval = &ApprovalRequestMsg{
 					Command:        "rm -rf /",
 					Classification: "risky",
@@ -220,6 +222,80 @@ func TestModelUpdate(t *testing.T) {
 			},
 		},
 		{
+			name: "sub-agent start locks input",
+			msg:  agent.SubAgentStartMsg{SkillName: "coder", Prompt: "refactor"},
+			wantState: StateSubAgent,
+			checkFn: func(t *testing.T, m Model, _ tea.Cmd) {
+				if m.state != StateSubAgent {
+					t.Errorf("state = %d, want StateSubAgent", m.state)
+				}
+				if m.statusBar.subAgentSkill != "coder" {
+					t.Errorf("subAgentSkill = %q, want coder", m.statusBar.subAgentSkill)
+				}
+			},
+		},
+		{
+			name: "sub-agent log appends to viewport",
+			msg:  agent.SubAgentLogMsg{SkillName: "coder", Activity: "tool_call", Detail: "list_files"},
+			checkFn: func(t *testing.T, m Model, _ tea.Cmd) {
+				// Just verify no panic occurred
+			},
+		},
+		{
+			name: "sub-agent done returns to previous state",
+			setup: func(m *Model) {
+				m.state = StateSubAgent
+				m.previousState = StateStreaming
+				m.input.SetEnabled(false)
+				m.statusBar.SetSubAgentSkill("coder")
+			},
+			msg:       agent.SubAgentDoneMsg{SkillName: "coder", Result: agent.SubAgentResult{Success: true, Summary: "done"}},
+			wantState: StateStreaming,
+			checkFn: func(t *testing.T, m Model, _ tea.Cmd) {
+				if m.statusBar.subAgentSkill != "" {
+					t.Error("subAgentSkill should be cleared after done")
+				}
+			},
+		},
+		{
+			name: "sub-agent approval returns to sub-agent state",
+			setup: func(m *Model) {
+				m.state = StateSubAgent
+				m.previousState = StateSubAgent
+				m.input.SetEnabled(false)
+			},
+			msg: ApprovalRequestMsg{
+				Command:        "ls",
+				Classification: "safe",
+				ResponseCh:     make(chan bool, 1),
+			},
+			wantState: StateAwaitingApproval,
+			checkFn: func(t *testing.T, m Model, _ tea.Cmd) {
+				if m.previousState != StateSubAgent {
+					t.Errorf("previousState = %d, want StateSubAgent", m.previousState)
+				}
+			},
+		},
+		{
+			name: "approval from sub-agent returns to sub-agent",
+			setup: func(m *Model) {
+				m.state = StateAwaitingApproval
+				m.previousState = StateSubAgent
+				m.pendingApproval = &ApprovalRequestMsg{
+					Command:        "ls",
+					Classification: "safe",
+					ResponseCh:     make(chan bool, 1),
+				}
+			},
+			msg:       tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")},
+			wantState: StateSubAgent,
+			checkFn: func(t *testing.T, m Model, _ tea.Cmd) {
+				if m.state != StateSubAgent {
+					t.Errorf("state = %d, want StateSubAgent", m.state)
+				}
+			},
+		},
+		{
 			name: "submit slash command routes through router",
 			setup: func(m *Model) {
 				m.router = NewSlashRouter()
@@ -292,6 +368,7 @@ func TestModel_MCPApprovalKeyY(t *testing.T) {
 	m := NewModel(nil, nil, nil)
 	ch := make(chan bool, 1)
 	m.state = StateMcpApproval
+	m.previousState = StateStreaming
 	m.pendingMCPApproval = &MCPApprovalRequestMsg{
 		ServerName: "test",
 		ToolName:   "tool",
@@ -317,6 +394,7 @@ func TestModel_MCPApprovalKeyN(t *testing.T) {
 	m := NewModel(nil, nil, nil)
 	ch := make(chan bool, 1)
 	m.state = StateMcpApproval
+	m.previousState = StateStreaming
 	m.pendingMCPApproval = &MCPApprovalRequestMsg{
 		ServerName: "test",
 		ToolName:   "tool",
@@ -519,6 +597,10 @@ func TestModel_CtrlPBlockedDuringOverlays(t *testing.T) {
 		{
 			name:  "resource browser",
 			state: StateResourceBrowser,
+		},
+		{
+			name:  "sub-agent",
+			state: StateSubAgent,
 		},
 		{
 			name: "command palette",

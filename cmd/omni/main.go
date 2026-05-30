@@ -86,13 +86,15 @@ func main() {
 	// TUI still launches and the user is prompted only when they try to chat.
 	models := agent.ResolveModels(cfg.ModelPriority)
 	var llmClient agent.LLMClient
+	var omniGoClient *agent.OmniGoClient
 	if len(models) == 0 {
 		fmt.Fprintln(os.Stderr, "Warning: no API key detected (set GOOGLE_API_KEY, ANTHROPIC_API_KEY, or OPENAI_API_KEY to enable the agent).")
 	} else {
-		llmClient, err = agent.NewOmniGoClient(models, true, agent.DefaultSystemPrompt)
+		omniGoClient, err = agent.NewOmniGoClient(models, true, agent.DefaultSystemPrompt)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: failed to initialize LLM client: %v\n", err)
-			llmClient = nil
+		} else {
+			llmClient = omniGoClient
 		}
 	}
 
@@ -234,6 +236,17 @@ func main() {
 	agentInstance.SetSend(func(msg interface{}) {
 		program.Send(msg)
 	})
+
+	// Register spawn_subagent tool after send is wired so progress messages flow to TUI.
+	if omniGoClient != nil {
+		registry.Register(agent.NewSpawnSubAgentTool(omniGoClient.OmniClient(), skillManager, registry, func(msg interface{}) {
+			program.Send(msg)
+		}))
+		allToolNames := agentInstance.AllToolNames()
+		if err := agentInstance.RecreateSession(agent.DefaultSystemPrompt, allToolNames, nil); err != nil {
+			log.Printf("Warning: failed to recreate session with spawn_subagent: %v", err)
+		}
+	}
 
 	// Activate skill on startup if --skill flag is provided.
 	if *skillName != "" {

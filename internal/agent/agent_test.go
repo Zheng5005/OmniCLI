@@ -22,6 +22,9 @@ type mockLLMClient struct {
 }
 
 func (m *mockLLMClient) ChatStream(ctx context.Context, messages []ChatMessage, toolDefs []ToolDefinition, onChunk func(StreamChunk)) (*ChatMessage, *Usage, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	idx := m.callCount
 	m.callCount++
 	if idx >= len(m.responses) {

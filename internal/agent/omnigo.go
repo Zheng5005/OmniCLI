@@ -37,6 +37,14 @@ type Run_command struct {
 	Command string `json:"command" desc:"Shell command to execute."`
 }
 
+// builtinToolSchemas maps built-in tool names to their OmniGo schema structs.
+var builtinToolSchemas = map[string]interface{}{
+	"list_files":  List_files{},
+	"grep_search": Grep_search{},
+	"read_file":   Read_file{},
+	"run_command": Run_command{},
+}
+
 // OmniGoClient adapts the OmniGo library to the LLMClient interface.
 // It uses OmniGo's synchronous Chat() for all calls since streaming does not
 // support tool calls. Text responses are delivered via onChunk as simulated
@@ -85,16 +93,9 @@ func NewOmniGoClientWithTools(models []string, enablePricing bool, systemPrompt 
 		toolNames = []string{"list_files", "grep_search", "read_file", "run_command"}
 	}
 
-	toolMap := map[string]interface{}{
-		"list_files":  List_files{},
-		"grep_search": Grep_search{},
-		"read_file":   Read_file{},
-		"run_command": Run_command{},
-	}
-
 	toolsToRegister := make([]interface{}, 0, len(toolNames))
 	for _, name := range toolNames {
-		if tool, ok := toolMap[name]; ok {
+		if tool, ok := builtinToolSchemas[name]; ok {
 			toolsToRegister = append(toolsToRegister, tool)
 		}
 	}
@@ -119,6 +120,42 @@ func NewOmniGoClientWithTools(models []string, enablePricing bool, systemPrompt 
 // ModelName returns the name of the primary model.
 func (o *OmniGoClient) ModelName() string {
 	return o.modelName
+}
+
+// OmniClient returns the underlying omnigo.Client.
+func (o *OmniGoClient) OmniClient() *omnigo.Client {
+	return o.client
+}
+
+// NewOmniGoClientFromClient creates an OmniGoClient from an existing omnigo.Client
+// with a custom system prompt and tool set. This is used for sub-agents that need
+// isolated sessions while sharing the parent's client configuration.
+func NewOmniGoClientFromClient(client *omnigo.Client, systemPrompt string, toolNames []string) (*OmniGoClient, error) {
+	session := client.NewSession(omnigo.WithSystemPrompt(systemPrompt))
+
+	toolsToRegister := make([]interface{}, 0, len(toolNames))
+	for _, name := range toolNames {
+		if name == "spawn_subagent" {
+			continue
+		}
+		if tool, ok := builtinToolSchemas[name]; ok {
+			toolsToRegister = append(toolsToRegister, tool)
+		}
+	}
+
+	if len(toolsToRegister) > 0 {
+		if err := session.RegisterTools(toolsToRegister...); err != nil {
+			return nil, fmt.Errorf("registering tools: %w", err)
+		}
+	}
+
+	return &OmniGoClient{
+		client:       client,
+		session:      session,
+		systemPrompt: systemPrompt,
+		tools:        toolsToRegister,
+		modelName:    "sub-agent",
+	}, nil
 }
 
 // ChatStream implements LLMClient. It uses OmniGo's synchronous Chat() to

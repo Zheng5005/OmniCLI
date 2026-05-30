@@ -41,6 +41,18 @@ type ErrorMsg struct {
 	Err error
 }
 
+// SubAgentStartMsg signals that a sub-agent has started execution.
+type SubAgentStartMsg struct {
+	SkillName string
+	Prompt    string
+}
+
+// SubAgentDoneMsg signals that a sub-agent has finished execution.
+type SubAgentDoneMsg struct {
+	SkillName string
+	Result    SubAgentResult
+}
+
 // Run executes the agent loop for a single user prompt. It streams LLM
 // responses, executes any requested tool calls, and re-invokes the LLM
 // until no more tool calls remain or the iteration limit is reached.

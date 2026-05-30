@@ -50,14 +50,15 @@ func (a Activity) color() lipgloss.Color {
 
 // StatusBarModel renders a full-width status bar with model name, activity, and cost.
 type StatusBarModel struct {
-	model       string
-	cost        float64
-	activity    Activity
-	width       int
-	skill       string
-	mcpStatus   string
-	flash       string
-	flashExpiry time.Time
+	model          string
+	cost           float64
+	activity       Activity
+	width          int
+	skill          string
+	subAgentSkill  string
+	mcpStatus      string
+	flash          string
+	flashExpiry    time.Time
 }
 
 // NewStatusBarModel creates a new status bar for the given model name and width.
@@ -90,6 +91,9 @@ func (m *StatusBarModel) SetSkill(name string) { m.skill = name }
 
 // SetMCPStatus updates the displayed MCP server status summary.
 func (m *StatusBarModel) SetMCPStatus(status string) { m.mcpStatus = status }
+
+// SetSubAgentSkill updates the displayed sub-agent skill name.
+func (m *StatusBarModel) SetSubAgentSkill(name string) { m.subAgentSkill = name }
 
 // SetFlash sets a brief flash message to display in the status bar.
 func (m *StatusBarModel) SetFlash(text string, duration time.Duration) {
@@ -128,6 +132,9 @@ func (m StatusBarModel) View(spinnerView string) string {
 	left := leftStyle.Render(leftText)
 
 	centerText := m.activity.String()
+	if m.subAgentSkill != "" {
+		centerText = "Sub-Agent: " + m.subAgentSkill
+	}
 	if m.flash != "" && time.Now().Before(m.flashExpiry) {
 		centerText = m.flash
 	} else {
